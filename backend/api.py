@@ -326,7 +326,32 @@ allowed_origins = [
     "https://prod-test.kortix.com",
 ]
 # Allow all *.kortix.com subdomains and Vercel preview deployments
-allow_origin_regex = r"https://([a-z0-9-]+\.)?kortix\.com|https://.*-kortixai\.vercel\.app"
+allow_origin_regex = r"https://([a-z0-9-]+\.)?kortix\.com|https://.*-kortixai\.vercel\.app|https://.*\.onrender\.com"
+
+def add_allowed_origin(origin):
+    if not origin:
+        return
+
+    normalized = origin.strip().rstrip("/")
+    if normalized and normalized not in allowed_origins:
+        allowed_origins.append(normalized)
+
+# Add explicit origins from environment for self-hosted deployments
+for env_origin in (
+    os.getenv("FRONTEND_URL"),
+    os.getenv("NEXT_PUBLIC_URL"),
+    os.getenv("RENDER_EXTERNAL_URL"),
+):
+    add_allowed_origin(env_origin)
+
+extra_allowed_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+if extra_allowed_origins:
+    for origin in extra_allowed_origins.split(","):
+        add_allowed_origin(origin)
+
+custom_allow_origin_regex = os.getenv("CORS_ALLOW_ORIGIN_REGEX")
+if custom_allow_origin_regex:
+    allow_origin_regex = f"{allow_origin_regex}|{custom_allow_origin_regex}"
 
 # Add local origins for development
 if config.ENV_MODE == EnvMode.LOCAL:

@@ -1,11 +1,20 @@
 import type { NextConfig } from 'next';
 
+const normalizeBackendUrl = (url: string): string => {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
+};
+
 // Dynamically determine backend URL based on Vercel environment
 const getBackendUrl = (): string => {
   // If explicitly set via Vercel dashboard/env, use that (highest priority)
   const explicitUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
   if (explicitUrl && explicitUrl.trim() !== '') {
-    return explicitUrl;
+    return normalizeBackendUrl(explicitUrl);
   }
   
   // Vercel environment detection
@@ -25,11 +34,16 @@ const getBackendUrl = (): string => {
       .replace(/[^a-z0-9-]/g, '-')
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '');
-    return `https://${sanitizedBranch}.staging-api.kortix.com/v1`;
+    return normalizeBackendUrl(`https://${sanitizedBranch}.staging-api.kortix.com/v1`);
   }
 
-  // Main branch / staging (default)
-  return 'https://staging-api.kortix.com/v1';
+  if (vercelEnv === 'preview' || vercelEnv === 'development') {
+    return normalizeBackendUrl('https://staging-api.kortix.com/v1');
+  }
+
+  // Non-Vercel safe default for self-hosted deployments.
+  // Intentionally avoids silently pointing to hosted Kortix infrastructure.
+  return normalizeBackendUrl('http://localhost:8000/v1');
 };
 
 const nextConfig = (): NextConfig => ({
