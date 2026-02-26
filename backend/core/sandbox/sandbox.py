@@ -1,3 +1,5 @@
+from typing import Optional
+
 from daytona_sdk import AsyncDaytona, DaytonaConfig, CreateSandboxFromSnapshotParams, AsyncSandbox, SessionExecuteRequest, Resources, SandboxState
 from dotenv import load_dotenv
 from core.utils.logger import logger
@@ -29,7 +31,24 @@ if daytona_config.target:
 else:
     logger.warning("No Daytona target found in environment variables")
 
-daytona = AsyncDaytona(daytona_config)
+daytona: Optional[AsyncDaytona] = None
+if daytona_config.api_key:
+    daytona = AsyncDaytona(daytona_config)
+
+
+def _get_daytona() -> AsyncDaytona:
+    """
+    Return configured Daytona client or raise a clear runtime error.
+
+    This avoids crashing API boot for self-hosted deployments that do not
+    provide Daytona credentials.
+    """
+    if daytona is None:
+        raise RuntimeError(
+            "Daytona is not configured. Set DAYTONA_API_KEY (and optional "
+            "DAYTONA_SERVER_URL/DAYTONA_TARGET) to enable sandbox features."
+        )
+    return daytona
 
 async def get_or_start_sandbox(sandbox_id: str) -> AsyncSandbox:
     """Retrieve a sandbox by ID, check its state, and start it if needed."""
@@ -37,18 +56,19 @@ async def get_or_start_sandbox(sandbox_id: str) -> AsyncSandbox:
     logger.info(f"Getting or starting sandbox with ID: {sandbox_id}")
 
     try:
-        sandbox = await daytona.get(sandbox_id)
+        client = _get_daytona()
+        sandbox = await client.get(sandbox_id)
         
         # Check if sandbox needs to be started
         if sandbox.state in [SandboxState.ARCHIVED, SandboxState.STOPPED, SandboxState.ARCHIVING]:
             logger.info(f"Sandbox is in {sandbox.state} state. Starting...")
             try:
-                await daytona.start(sandbox)
+                await client.start(sandbox)
                 
                 # Wait for sandbox to reach STARTED state
                 for _ in range(30):
                     await asyncio.sleep(1)
-                    sandbox = await daytona.get(sandbox_id)
+                    sandbox = await client.get(sandbox_id)
                     if sandbox.state == SandboxState.STARTED:
                         break
                 
@@ -117,7 +137,8 @@ async def create_sandbox(password: str, project_id: str = None) -> AsyncSandbox:
     )
     
     # Create the sandbox
-    sandbox = await daytona.create(params)
+    client = _get_daytona()
+    sandbox = await client.create(params)
     logger.info(f"Sandbox created with ID: {sandbox.id}")
     
     # Start supervisord in a session for new sandbox
@@ -132,10 +153,11 @@ async def delete_sandbox(sandbox_id: str) -> bool:
 
     try:
         # Get the sandbox
-        sandbox = await daytona.get(sandbox_id)
+        client = _get_daytona()
+        sandbox = await client.get(sandbox_id)
         
         # Delete the sandbox
-        await daytona.delete(sandbox)
+        await client.delete(sandbox)
         
         logger.info(f"Successfully deleted sandbox {sandbox_id}")
         return True
