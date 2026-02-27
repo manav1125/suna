@@ -35,12 +35,11 @@ SUNA_CONFIG = {
         "browser_tool": True,
         
         # Agent builder tools
-        "agent_config_tool": True,
-        "agent_creation_tool": True,
-        "mcp_search_tool": True,
-        "credential_profile_tool": True,
-        "trigger_tool": True
+        "agent_config_tool": False,
+        "agent_creation_tool": False,
+        "mcp_search_tool": False,
+        "credential_profile_tool": False,
+        "trigger_tool": False
     },
     "is_default": True
 }
-

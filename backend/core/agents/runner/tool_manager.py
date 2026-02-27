@@ -112,8 +112,10 @@ class ToolManager:
         self.thread_manager.add_tool(MessageTool)
         self.thread_manager.add_tool(TaskListTool, project_id=self.project_id, thread_manager=self.thread_manager, thread_id=self.thread_id)
         
-        # Search tools (if API keys configured AND enabled in config)
-        if (config.TAVILY_API_KEY or config.FIRECRAWL_API_KEY) and self._is_tool_enabled('web_search_tool'):
+        # Search tools
+        # web_search_tool supports an internal no-key fallback, so it should be
+        # available whenever enabled in agent config.
+        if self._is_tool_enabled('web_search_tool'):
             enabled_methods = self._get_enabled_methods_for_tool('web_search_tool')
             self.thread_manager.add_tool(SandboxWebSearchTool, function_names=enabled_methods, thread_manager=self.thread_manager, project_id=self.project_id)
         
@@ -170,7 +172,25 @@ class ToolManager:
                 except (ImportError, AttributeError) as e:
                     logger.warning(f"Failed to load core tool {tool_name}: {e}")
         
-        self._register_agent_builder_tools()
+        if self._should_register_agent_builder_tools():
+            self._register_agent_builder_tools()
+        else:
+            logger.info("Skipping agent builder tools for this agent/session")
+
+    def _should_register_agent_builder_tools(self) -> bool:
+        """
+        Agent-builder tools are high-friction in normal chat flows and can hijack
+        generic research requests (e.g., "look up X") into MCP setup loops.
+        Keep them disabled for Suna default workers by default.
+        """
+        if not self.agent_config:
+            return False
+
+        # Default Suna/Kortex chat worker: do not expose agent-builder tools.
+        if self.agent_config.get('is_suna_default', False):
+            return False
+
+        return True
     
     def _register_agent_builder_tools(self):
         from core.tools.tool_registry import get_tool_info, get_tool_class

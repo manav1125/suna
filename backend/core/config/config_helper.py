@@ -222,11 +222,11 @@ def _get_default_agentpress_tools() -> Dict[str, bool]:
         "browser_tool": True,
         "sb_git_sync": True,
         "people_search_tool": False,
-        "agent_config_tool": True,
-        "mcp_search_tool": True,
-        "credential_profile_tool": True,
-        "agent_creation_tool": True,
-        "trigger_tool": True
+        "agent_config_tool": False,
+        "mcp_search_tool": False,
+        "credential_profile_tool": False,
+        "agent_creation_tool": False,
+        "trigger_tool": False
     }
 
 
@@ -250,5 +250,4 @@ def _extract_agentpress_tools_for_run(agentpress_config: Dict[str, Any]) -> Dict
             }
     
     return run_tools
-
 
