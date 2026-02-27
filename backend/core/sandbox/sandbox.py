@@ -1,6 +1,16 @@
 from typing import Optional
 
-from daytona_sdk import AsyncDaytona, DaytonaConfig, CreateSandboxFromSnapshotParams, AsyncSandbox, SessionExecuteRequest, Resources, SandboxState
+from daytona_sdk import (
+    AsyncDaytona,
+    DaytonaConfig,
+    CreateSandboxFromSnapshotParams,
+    CreateSandboxFromImageParams,
+    AsyncSandbox,
+    SessionExecuteRequest,
+    Resources,
+    SandboxState,
+    DaytonaError,
+)
 from dotenv import load_dotenv
 from core.utils.logger import logger
 from core.utils.config import config
@@ -110,8 +120,7 @@ async def create_sandbox(password: str, project_id: str = None) -> AsyncSandbox:
         # logger.debug(f"Using sandbox_id as label: {project_id}")
         labels = {'id': project_id}
         
-    params = CreateSandboxFromSnapshotParams(
-        snapshot=Configuration.SANDBOX_SNAPSHOT_NAME,
+    common_kwargs = dict(
         public=True,
         labels=labels,
         env_vars={
@@ -135,10 +144,36 @@ async def create_sandbox(password: str, project_id: str = None) -> AsyncSandbox:
         auto_stop_interval=15,
         auto_archive_interval=30,
     )
-    
+
+    snapshot_params = CreateSandboxFromSnapshotParams(
+        snapshot=Configuration.SANDBOX_SNAPSHOT_NAME,
+        **common_kwargs,
+    )
+
+    image_params = CreateSandboxFromImageParams(
+        image=Configuration.SANDBOX_IMAGE_NAME,
+        **common_kwargs,
+    )
+
     # Create the sandbox
     client = _get_daytona()
-    sandbox = await client.create(params)
+    try:
+        sandbox = await client.create(snapshot_params)
+    except DaytonaError as e:
+        error_text = str(e).lower()
+        if (
+            "snapshot" in error_text and "not found" in error_text
+        ) or (
+            "snapshot" in error_text and "doesn't exist" in error_text
+        ):
+            logger.warning(
+                "Snapshot '%s' not found. Falling back to image '%s'.",
+                Configuration.SANDBOX_SNAPSHOT_NAME,
+                Configuration.SANDBOX_IMAGE_NAME,
+            )
+            sandbox = await client.create(image_params)
+        else:
+            raise
     logger.info(f"Sandbox created with ID: {sandbox.id}")
     
     # Start supervisord in a session for new sandbox
