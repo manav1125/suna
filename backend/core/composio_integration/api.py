@@ -581,6 +581,15 @@ async def get_toolkit_icon(
             }
     
     except Exception as e:
+        err = str(e).lower()
+        if "composio_api_key is required" in err:
+            # Composio is optional in self-host setups.
+            return {
+                "success": False,
+                "toolkit_slug": toolkit_slug,
+                "icon_url": None,
+                "message": "Composio is not configured"
+            }
         logger.error(f"Error getting toolkit icon: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -620,6 +629,13 @@ async def get_toolkit_icons_batch(
     except HTTPException:
         raise
     except Exception as e:
+        err = str(e).lower()
+        if "composio_api_key is required" in err:
+            # Composio is optional in self-host setups.
+            return {
+                "success": True,
+                "icons": {}
+            }
         logger.error(f"Error getting toolkit icons batch: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 

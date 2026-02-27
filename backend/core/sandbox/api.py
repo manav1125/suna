@@ -897,8 +897,23 @@ async def get_project_sandbox_status(
 
         account_id = project_data.get('account_id')
         if account_id:
-            account_user_result = await client.schema('basejump').from_('account_user').select('account_role').eq('user_id', user_id).eq('account_id', account_id).execute()
-            if not (account_user_result.data and len(account_user_result.data) > 0):
+            # Self-host deployments may not expose the basejump schema.
+            # Fall back to strict owner check (account_id == user_id) in that case.
+            membership_verified = False
+            try:
+                account_user_result = await client.schema('basejump').from_('account_user').select('account_role').eq('user_id', user_id).eq('account_id', account_id).execute()
+                membership_verified = bool(account_user_result.data and len(account_user_result.data) > 0)
+            except Exception as e:
+                err = str(e).lower()
+                if "basejump" in err:
+                    logger.warning(
+                        f"Basejump schema unavailable for sandbox status auth check; "
+                        f"falling back to owner check for project {project_id}: {e}"
+                    )
+                else:
+                    raise
+
+            if not membership_verified and account_id != user_id:
                 raise HTTPException(status_code=403, detail="Not authorized")
 
     try:
