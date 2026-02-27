@@ -515,21 +515,23 @@ Examples:
             elif file_path:
                 paths = [f"{self.workspace_path}/{self.clean_path(file_path)}"]
             else:
-                # Check default paths: uploads, KB directory, and workspace root
+                # Check default paths where user-provided files are expected.
                 default_paths = [
                     f"{self.workspace_path}/uploads",
                     f"{self.workspace_path}/downloads/global-knowledge",
-                    self.workspace_path
                 ]
                 for candidate in default_paths:
-                    check = await self.sandbox.process.exec(f"test -e {shlex.quote(candidate)} && echo 'ok'")
+                    check = await self.sandbox.process.exec(f"test -d {shlex.quote(candidate)} && echo 'ok'")
                     if "ok" in check.result:
                         paths.append(candidate)
 
                 if not paths:
-                    return self.fail_response(
-                        "No searchable paths found. Upload files to /workspace/uploads or sync knowledge base with global_kb_sync first."
-                    )
+                    return self.success_response({
+                        "query": query,
+                        "total_hits": 0,
+                        "results": [],
+                        "note": "No local files found to search. Upload files first, or use web tools for internet research."
+                    })
 
             # Verify explicitly provided paths exist
             if file_paths or file_path:
@@ -541,81 +543,106 @@ Examples:
             if not await self._ensure_kb():
                 return self.fail_response("Failed to initialize search. Try read_file instead.")
             
-            # Force kb/lss SQLite/cache locations to a writable path in ephemeral sandboxes.
+            # Force kb SQLite/cache locations to a writable path in ephemeral sandboxes.
             # Some Daytona images set HOME/read-only paths that cause:
             # "[search] ERROR unable to open database file".
             env = {
                 "HOME": "/tmp",
-                "LSS_DIR": "/tmp/.lss",
+                "KB_DIR": "/tmp/knowledge-base",
                 "XDG_CACHE_HOME": "/tmp/.cache",
             }
             if config.OPENAI_API_KEY:
                 env["OPENAI_API_KEY"] = config.OPENAI_API_KEY
 
             await self.sandbox.process.exec(
-                "mkdir -p /tmp/.lss /tmp/.cache",
+                "mkdir -p /tmp/knowledge-base /tmp/.cache",
                 cwd=self.workspace_path,
                 timeout=30,
             )
-            
-            path_args = " ".join([shlex.quote(p) for p in paths])
-            escaped_query = shlex.quote(query)
-            cmd = f"kb search {path_args} {escaped_query} -k 10 --json"
-            
-            result = await self.sandbox.process.exec(cmd, env=env, cwd=self.workspace_path, timeout=120)
 
-            if result.exit_code != 0 and "unable to open database file" in (result.result or "").lower():
-                logger.warning("[SearchFile] Retrying kb search from /tmp due to sqlite path error")
-                await self.sandbox.process.exec("mkdir -p /tmp/.lss /tmp/.cache", cwd="/tmp", timeout=30)
-                result = await self.sandbox.process.exec(cmd, env=env, cwd="/tmp", timeout=120)
-            
-            if result.exit_code != 0:
-                logger.error(f"[SearchFile] kb search failed: {result.result}")
-                return self.fail_response(f"Search failed: {result.result[:500]}")
-            
-            logger.info(f"[SearchFile] Raw kb output (first 1000 chars): {result.result[:1000]}")
-            
-            try:
-                search_results = json.loads(result.result)
-                
-                total_hits = 0
-                formatted_results = []
-                
+            # kb-fusion CLI expects a single file path (not a directory/list), so expand
+            # directories to files first and then run per-file searches.
+            resolved_files = []
+            for p in paths:
+                kind_check = await self.sandbox.process.exec(
+                    f"if test -f {shlex.quote(p)}; then echo file; "
+                    f"elif test -d {shlex.quote(p)}; then echo dir; else echo missing; fi"
+                )
+                kind = (kind_check.result or "").strip()
+                if kind == "file":
+                    resolved_files.append(p)
+                elif kind == "dir":
+                    find_result = await self.sandbox.process.exec(
+                        f"find {shlex.quote(p)} -type f | head -n {MAX_BATCH_SIZE}",
+                        timeout=60,
+                    )
+                    if find_result.exit_code == 0 and find_result.result:
+                        resolved_files.extend([line.strip() for line in find_result.result.splitlines() if line.strip()])
+
+            deduped_files = []
+            seen = set()
+            for f in resolved_files:
+                if f not in seen:
+                    seen.add(f)
+                    deduped_files.append(f)
+            resolved_files = deduped_files[:MAX_BATCH_SIZE]
+
+            if not resolved_files:
+                return self.success_response({
+                    "query": query,
+                    "total_hits": 0,
+                    "results": [],
+                    "note": "No searchable files found in the selected paths."
+                })
+
+            total_hits = 0
+            formatted_results = []
+            search_errors = []
+            escaped_query = shlex.quote(query)
+
+            for target_file in resolved_files:
+                cmd = f"kb search {shlex.quote(target_file)} {escaped_query} -k 10 --json"
+                result = await self.sandbox.process.exec(cmd, env=env, cwd=self.workspace_path, timeout=120)
+
+                if result.exit_code != 0 and "unable to open database file" in (result.result or "").lower():
+                    logger.warning("[SearchFile] Retrying kb search from /tmp due to sqlite path error")
+                    await self.sandbox.process.exec("mkdir -p /tmp/knowledge-base /tmp/.cache", cwd="/tmp", timeout=30)
+                    result = await self.sandbox.process.exec(cmd, env=env, cwd="/tmp", timeout=120)
+
+                if result.exit_code != 0:
+                    logger.error(f"[SearchFile] kb search failed for {target_file}: {result.result}")
+                    search_errors.append(f"{target_file}: {result.result[:300]}")
+                    continue
+
+                try:
+                    search_results = json.loads(result.result)
+                except json.JSONDecodeError:
+                    search_errors.append(f"{target_file}: invalid JSON from kb")
+                    continue
+
                 for query_result in search_results:
-                    q = query_result.get("query", query)
                     hits = query_result.get("hits", [])
                     total_hits += len(hits)
-                    
-                    if hits:
-                        logger.info(f"[SearchFile] First hit structure: {list(hits[0].keys())}")
-                    
+
                     for hit in hits[:10]:
                         content = hit.get("content") or hit.get("chunk") or hit.get("text") or hit.get("snippet") or ""
-                        file_path = hit.get("file_path") or hit.get("path") or hit.get("file") or ""
-                        
-                        if not content and hit:
-                            logger.info(f"[SearchFile] Hit has no content. Keys: {list(hit.keys())}, first 500 chars: {str(hit)[:500]}")
-                        
+                        hit_file_path = hit.get("file_path") or hit.get("path") or hit.get("file") or target_file
                         formatted_results.append({
-                            "file": file_path.replace(self.workspace_path + "/", ""),
+                            "file": hit_file_path.replace(self.workspace_path + "/", ""),
                             "score": round(hit.get("score", 0), 3),
                             "content": content[:8000] if content else "[No content - check hit structure]"
                         })
-                
-                logger.info(f"[SearchFile] Found {total_hits} results for '{query}'")
-                
-                return self.success_response({
-                    "query": query,
-                    "total_hits": total_hits,
-                    "results": formatted_results,
-                    "note": "Showing top relevant chunks. Use read_file if you need the complete file."
-                })
-                
-            except json.JSONDecodeError:
-                return self.success_response({
-                    "query": query,
-                    "raw_results": result.result[:5000]
-                })
+
+            if total_hits == 0 and search_errors:
+                return self.fail_response(f"Search failed: {search_errors[0][:500]}")
+
+            logger.info(f"[SearchFile] Found {total_hits} results for '{query}' across {len(resolved_files)} files")
+            return self.success_response({
+                "query": query,
+                "total_hits": total_hits,
+                "results": formatted_results[:50],
+                "note": "Showing top relevant chunks. Use read_file if you need complete file contents."
+            })
                 
         except Exception as e:
             logger.error(f"[SearchFile] Error: {e}", exc_info=True)
