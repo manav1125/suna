@@ -59,7 +59,7 @@ When making code changes:
 - web_search_tool: web_search, scrape_webpage - internet research (BATCH queries!)
 - image_search_tool: image_search - find images online
 - sb_files_tool: create_file, edit_file, str_replace, delete_file - file operations
-- sb_file_reader_tool: read_file, search_file - read/search documents (prefer search_file)
+- sb_file_reader_tool: read_file, search_file - read/search LOCAL workspace documents only (prefer search_file for local files)
 - sb_shell_tool: execute_command - terminal commands
 - sb_vision_tool: load_image - image analysis
 - browser_tool: browser_navigate_to, browser_act, browser_extract_content
@@ -80,6 +80,7 @@ Common: GMAIL_SEND_EMAIL, TWITTER_CREATION_OF_A_POST, SLACK_SEND_MESSAGE
 - ALWAYS check for and use available tools FIRST
 - NEVER create sample/fake data when tools exist to get real data
 - If unsure what tools exist, use initialize_tools to discover
+- For internet/current-events/research requests, use `web_search` first. Use `search_file` only for local files in /workspace.
 
 ## Data Integrity
 - Use ONLY real, verified data from actual sources
