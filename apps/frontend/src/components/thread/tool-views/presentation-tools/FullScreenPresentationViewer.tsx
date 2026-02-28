@@ -20,7 +20,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { constructHtmlPreviewUrl } from '@/lib/utils/url';
+import { constructHtmlPreviewUrl, withQueryParam } from '@/lib/utils/url';
 import { downloadPresentation, DownloadFormat, handleGoogleSlidesUpload, fetchPresentationMetadata, sanitizePresentationName } from '../utils/presentation-utils';
 import { useDownloadRestriction } from '@/hooks/billing';
 import { useAuth } from '@/components/AuthProvider';
@@ -380,7 +380,7 @@ export function FullScreenPresentationViewer({
         );
       }
       // Add cache-busting to iframe src to ensure fresh content
-      const slideUrlWithCacheBust = `${effectiveSlideUrl}?t=${refreshTimestamp}`;
+      const slideUrlWithCacheBust = withQueryParam(effectiveSlideUrl, 't', refreshTimestamp) || effectiveSlideUrl;
 
       return (
         <div className="w-full h-full flex items-center justify-center bg-transparent">

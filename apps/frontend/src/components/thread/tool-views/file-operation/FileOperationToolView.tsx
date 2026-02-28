@@ -76,6 +76,7 @@ import { PresentationSlideSkeleton } from '../presentation-tools/PresentationSli
 import { usePresentationViewerStore } from '@/stores/presentation-viewer-store';
 import { useKortixComputerStore } from '@/stores/kortix-computer-store';
 import { useSmoothStream } from '@/lib/streaming';
+import { useAuth } from '@/components/AuthProvider';
 
 const UnifiedDiffView: React.FC<{ lineDiff: LineDiff[]; fileName?: string }> = ({ lineDiff, fileName }) => (
   <div className="font-mono text-[13px] leading-relaxed">
@@ -216,6 +217,7 @@ export function FileOperationToolView({
   streamingText,
 }: ToolViewProps) {
   const { resolvedTheme } = useTheme();
+  const { session } = useAuth();
   const isDarkTheme = resolvedTheme === 'dark';
 
   // Presentation viewer store for opening fullscreen presentation
@@ -859,6 +861,7 @@ export function FileOperationToolView({
             <PresentationSlideCard
               slide={slideData}
               project={project}
+              accessToken={session?.access_token}
               onFullScreenClick={(slideNum) => {
                 openPresentation(
                   presentationName,

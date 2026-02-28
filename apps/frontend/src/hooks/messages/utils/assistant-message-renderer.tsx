@@ -334,7 +334,12 @@ function SlideInlineThumbnail({
         });
         const slideData = data.slides?.[slideInfo.slideNumber];
         if (slideData?.file_path) {
-          const url = constructHtmlPreviewUrl(project.sandbox.sandbox_url, slideData.file_path);
+          const url = constructHtmlPreviewUrl(project.sandbox.sandbox_url, slideData.file_path, {
+            preferBackendProxy: true,
+            sandboxId: project?.sandbox?.id,
+            accessToken: session?.access_token,
+            inline: true,
+          });
           setSlideUrl(url);
         }
       } catch (e) {

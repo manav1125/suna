@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Maximize2, Presentation } from 'lucide-react';
-import { constructHtmlPreviewUrl } from '@/lib/utils/url';
+import { constructHtmlPreviewUrl, withQueryParam } from '@/lib/utils/url';
 import { Project } from '@/lib/api/threads';
 
 interface SlideMetadata {
@@ -44,7 +44,7 @@ export function PresentationSlideCard({
       inline: true,
     });
     if (!url) return null;
-    return refreshTimestamp ? `${url}?t=${refreshTimestamp}` : url;
+    return refreshTimestamp ? withQueryParam(url, 't', refreshTimestamp) || url : url;
   }, [project?.sandbox?.sandbox_url, project?.sandbox?.id, slide.file_path, refreshTimestamp, accessToken]);
 
   useEffect(() => {

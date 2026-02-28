@@ -117,3 +117,24 @@ export function constructHtmlPreviewUrl(
 
   return `${sandboxUrl}/${encodedPath}`;
 }
+
+/**
+ * Safely append or replace a query param on a URL string.
+ */
+export function withQueryParam(
+  url: string | undefined,
+  key: string,
+  value: string | number | boolean,
+): string | undefined {
+  if (!url) return undefined;
+
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set(key, String(value));
+    return parsed.toString();
+  } catch {
+    // Fallback for malformed or relative URLs
+    const separator = url.includes('?') ? '&' : '?';
+    return `${url}${separator}${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`;
+  }
+}
