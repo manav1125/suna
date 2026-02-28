@@ -104,7 +104,7 @@ class ComposioIntegrationService:
             
             mcp_url_response = await self.mcp_server_service.generate_mcp_url(
                 mcp_server_id=mcp_server.id,
-                connected_account_id=[connected_account.id],
+                connected_account_ids=[connected_account.id],
                 user_ids=[user_id]
             )
             
