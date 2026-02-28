@@ -9,6 +9,8 @@ import json
 import logging
 import time
 from typing import Union, List
+import re
+from urllib.parse import quote_plus
 
 @tool_metadata(
     display_name="Image Search",
@@ -57,7 +59,7 @@ class SandboxImageSearchTool(SandboxToolsBase):
         
         if not self.serper_api_key:
             from core.utils.logger import logger
-            logger.warning("SERPER_API_KEY not configured - Image Search Tool will not be available")
+            logger.warning("SERPER_API_KEY not configured - using fallback image search provider")
 
     @openapi_schema({
         "type": "function",
@@ -109,10 +111,6 @@ class SandboxImageSearchTool(SandboxToolsBase):
         queries = []
         
         try:
-            # Check if Serper API key is configured
-            if not self.serper_api_key:
-                return self.fail_response("Image Search is not available. SERPER_API_KEY is not configured.")
-            
             # Validate inputs
             if isinstance(query, str):
                 if not query or not query.strip():
@@ -127,10 +125,6 @@ class SandboxImageSearchTool(SandboxToolsBase):
             else:
                 return self.fail_response("Query must be either a string or list of strings.")
             
-            # Check if SERPER API key is available
-            if not self.serper_api_key:
-                return self.fail_response("SERPER_API_KEY not configured. Image search is not available.")
-            
             # Normalize num_results
             if num_results is None:
                 num_results = 12
@@ -143,32 +137,65 @@ class SandboxImageSearchTool(SandboxToolsBase):
             # Clamp num_results to valid range
             num_results = max(1, min(num_results, 100))
 
-            if is_batch:
-                logging.info(f"Executing batch image search for {len(queries)} queries with {num_results} results each")
-                # Batch API request
-                payload = [{"q": q, "num": num_results} for q in queries]
-            else:
-                logging.info(f"Executing image search for query: '{queries[0]}' with {num_results} results")
-                # Single API request  
-                payload = {"q": queries[0], "num": num_results}
-            
-            # SERPER API request
             start_time = time.time()
-            async with get_http_client() as client:
-                headers = {
-                    "X-API-KEY": self.serper_api_key,
-                    "Content-Type": "application/json"
-                }
-                
-                response = await client.post(
-                    "https://google.serper.dev/images",
-                    json=payload,
-                    headers=headers,
-                    timeout=30.0
-                )
-                
-                response.raise_for_status()
-                data = response.json()
+            data = None
+
+            if self.serper_api_key:
+                if is_batch:
+                    logging.info(f"Executing batch image search for {len(queries)} queries with {num_results} results each (SERPER)")
+                    payload = [{"q": q, "num": num_results} for q in queries]
+                else:
+                    logging.info(f"Executing image search for query: '{queries[0]}' with {num_results} results (SERPER)")
+                    payload = {"q": queries[0], "num": num_results}
+
+                async with get_http_client() as client:
+                    headers = {
+                        "X-API-KEY": self.serper_api_key,
+                        "Content-Type": "application/json"
+                    }
+                    response = await client.post(
+                        "https://google.serper.dev/images",
+                        json=payload,
+                        headers=headers,
+                        timeout=30.0
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+            else:
+                provider = "bing_fallback"
+                if is_batch:
+                    logging.info(f"Executing batch image search for {len(queries)} queries with {num_results} results ({provider})")
+                    batch_results = []
+                    for q in queries:
+                        urls = await self._fallback_image_search(q, num_results)
+                        batch_results.append({
+                            "query": q,
+                            "total_found": len(urls),
+                            "images": urls
+                        })
+                    elapsed_time = round(time.time() - start_time, 2)
+                    result = {
+                        "batch_results": batch_results,
+                        "total_queries": len(queries),
+                        "response_time": elapsed_time,
+                        "provider": provider
+                    }
+                    return ToolResult(success=True, output=json.dumps(result, ensure_ascii=False))
+                else:
+                    logging.info(f"Executing image search for query: '{queries[0]}' with {num_results} results ({provider})")
+                    urls = await self._fallback_image_search(queries[0], num_results)
+                    if not urls:
+                        return self.fail_response(f"No images found for query: '{queries[0]}'")
+                    elapsed_time = round(time.time() - start_time, 2)
+                    result = {
+                        "query": queries[0],
+                        "total_found": len(urls),
+                        "images": urls,
+                        "response_time": elapsed_time,
+                        "provider": provider
+                    }
+                    return ToolResult(success=True, output=json.dumps(result, ensure_ascii=False))
+
             elapsed_time = round(time.time() - start_time, 2)
             
             if is_batch:
@@ -244,3 +271,56 @@ class SandboxImageSearchTool(SandboxToolsBase):
             if len(error_message) > 200:
                 simplified_message += "..."
             return self.fail_response(simplified_message)
+
+    async def _fallback_image_search(self, query: str, num_results: int) -> List[str]:
+        """Fallback image search provider using Bing image results HTML parsing."""
+        try:
+            from bs4 import BeautifulSoup
+
+            url = f"https://www.bing.com/images/search?q={quote_plus(query)}&form=HDRSC2"
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+            }
+
+            async with get_http_client() as client:
+                response = await client.get(url, headers=headers, timeout=20.0, follow_redirects=True)
+                response.raise_for_status()
+                html = response.text
+
+            soup = BeautifulSoup(html, "html.parser")
+            image_urls: List[str] = []
+            seen = set()
+
+            # Primary extraction path
+            for anchor in soup.select("a.iusc"):
+                raw_meta = anchor.get("m")
+                if not raw_meta:
+                    continue
+                try:
+                    meta = json.loads(raw_meta)
+                except Exception:
+                    continue
+                img_url = meta.get("murl") or meta.get("turl")
+                if img_url and img_url not in seen:
+                    seen.add(img_url)
+                    image_urls.append(img_url)
+                    if len(image_urls) >= num_results:
+                        return image_urls
+
+            # Secondary regex fallback
+            if len(image_urls) < num_results:
+                for match in re.findall(r'"murl":"(https?:\\/\\/[^"]+)"', html):
+                    img_url = match.replace("\\/", "/")
+                    if img_url and img_url not in seen:
+                        seen.add(img_url)
+                        image_urls.append(img_url)
+                        if len(image_urls) >= num_results:
+                            break
+
+            return image_urls
+        except Exception as e:
+            logging.error(f"Fallback image search failed for '{query}': {e}")
+            return []

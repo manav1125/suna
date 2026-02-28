@@ -122,7 +122,7 @@ class ToolManager:
             enabled_methods = self._get_enabled_methods_for_tool('web_search_tool')
             self.thread_manager.add_tool(SandboxWebSearchTool, function_names=enabled_methods, thread_manager=self.thread_manager, project_id=self.project_id)
         
-        if config.SERPER_API_KEY and self._is_tool_enabled('image_search_tool'):
+        if self._is_tool_enabled('image_search_tool'):
             enabled_methods = self._get_enabled_methods_for_tool('image_search_tool')
             self.thread_manager.add_tool(SandboxImageSearchTool, function_names=enabled_methods, thread_manager=self.thread_manager, project_id=self.project_id)
         
