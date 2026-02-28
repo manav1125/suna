@@ -218,6 +218,8 @@ def _get_default_agentpress_tools() -> Dict[str, bool]:
         "image_search_tool": True,
         "sb_vision_tool": True,
         "sb_image_edit_tool": True,
+        "sb_design_tool": True,
+        "sb_canvas_tool": True,
         "sb_presentation_tool": True,
         "browser_tool": True,
         "sb_git_sync": True,
@@ -250,4 +252,3 @@ def _extract_agentpress_tools_for_run(agentpress_config: Dict[str, Any]) -> Dict
             }
     
     return run_tools
-

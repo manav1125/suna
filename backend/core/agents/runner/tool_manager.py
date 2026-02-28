@@ -24,9 +24,12 @@ DEFAULT_CORE_TOOLS = [
     'sb_file_reader_tool',  # File reading
     'sb_vision_tool',       # Image understanding
     'sb_image_edit_tool',   # Image generation
+    'sb_design_tool',       # OpenAI-powered design generation
     'sb_upload_file_tool',  # File uploads
     'sb_expose_tool',       # Port exposure
     'sb_kb_tool',           # Knowledge base operations
+    'sb_presentation_tool', # Presentation creation
+    'sb_canvas_tool',       # Canvas composition
     'composio_upload_tool', # Composio S3 uploads for email attachments
     'agent_config_tool',
     'agent_creation_tool',
@@ -143,9 +146,12 @@ class ToolManager:
             'sb_file_reader_tool',
             'sb_vision_tool',
             'sb_image_edit_tool',
+            'sb_design_tool',
             'sb_upload_file_tool',
             'sb_expose_tool',
             'sb_kb_tool',  # Knowledge base operations
+            'sb_presentation_tool',
+            'sb_canvas_tool',
             'composio_upload_tool',  # Composio S3 uploads for email attachments
         ]
         tools_needing_thread_id = {'sb_vision_tool', 'sb_image_edit_tool', 'sb_design_tool'}

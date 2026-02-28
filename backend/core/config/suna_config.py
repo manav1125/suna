@@ -23,6 +23,7 @@ SUNA_CONFIG = {
         "sb_vision_tool": True,
         "sb_image_edit_tool": True,
         "sb_design_tool": True,
+        "sb_canvas_tool": True,
         
         # Document and content creation
         "sb_presentation_tool": True,

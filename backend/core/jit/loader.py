@@ -32,6 +32,9 @@ class JITLoader:
             'image_search_tool',
             'sb_vision_tool',
             'sb_image_edit_tool',
+            'sb_design_tool',
+            'sb_presentation_tool',
+            'sb_canvas_tool',
             'browser_tool',
             'sb_git_sync',
             'sb_upload_file_tool',
@@ -349,4 +352,3 @@ class JITLoader:
 
 def get_jit_loader() -> JITLoader:
     return JITLoader()
-
