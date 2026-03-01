@@ -31,7 +31,21 @@ type JwtPayload = {
   sub?: string;
   role?: string;
   aud?: string | string[];
+  iss?: string;
+  ref?: string;
 };
+
+const EXPECTED_SUPABASE_REF = (() => {
+  const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!rawUrl) return null;
+  try {
+    const hostname = new URL(rawUrl).hostname.toLowerCase();
+    const ref = hostname.split('.')[0];
+    return ref || null;
+  } catch {
+    return null;
+  }
+})();
 
 function parseJwtPayload(token: string): JwtPayload | null {
   try {
@@ -65,6 +79,12 @@ function isUserAccessToken(token: string): boolean {
   if (typeof payload.sub !== 'string' || payload.sub.trim().length === 0) return false;
   const role = typeof payload.role === 'string' ? payload.role.toLowerCase() : '';
   if (role === 'anon' || role === 'service_role') return false;
+  if (EXPECTED_SUPABASE_REF) {
+    const ref = typeof payload.ref === 'string' ? payload.ref.toLowerCase() : '';
+    if (ref && ref !== EXPECTED_SUPABASE_REF) return false;
+    const issuer = typeof payload.iss === 'string' ? payload.iss.toLowerCase() : '';
+    if (issuer && !issuer.includes(`${EXPECTED_SUPABASE_REF}.supabase.`)) return false;
+  }
   return true;
 }
 
@@ -205,7 +225,16 @@ function getStorageKeys(): string[] {
   const keys: string[] = [];
   for (let i = 0; i < window.localStorage.length; i += 1) {
     const key = window.localStorage.key(i);
-    if (key) keys.push(key);
+    if (!key) continue;
+    if (
+      EXPECTED_SUPABASE_REF &&
+      key.startsWith('sb-') &&
+      key.includes('auth-token') &&
+      !key.startsWith(`sb-${EXPECTED_SUPABASE_REF}-`)
+    ) {
+      continue;
+    }
+    keys.push(key);
   }
   return keys;
 }
