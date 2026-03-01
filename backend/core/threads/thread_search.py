@@ -158,6 +158,8 @@ class ThreadSearchService:
 
         self._openai_client = None
         self._is_configured = False
+        self._documents_table_available: Optional[bool] = None
+        self._documents_table_warning_logged = False
 
         # Check if OpenAI API key is available
         self._openai_api_key = os.getenv("OPENAI_API_KEY")
@@ -169,6 +171,31 @@ class ThreadSearchService:
             logger.warning("[ThreadSearch] Service not configured. Missing: OPENAI_API_KEY")
 
         self._initialized = True
+
+    def _is_documents_table_missing_error(self, error: Exception) -> bool:
+        """Detect missing pgvector documents table errors in self-hosted DBs."""
+        error_text = str(error).lower()
+        return (
+            'public.documents' in error_text and ('does not exist' in error_text or 'undefinedtable' in error_text)
+        ) or (
+            'relation "documents" does not exist' in error_text
+        ) or (
+            '42p01' in error_text
+        )
+
+    def _mark_documents_table_unavailable(self, context: str, error: Exception) -> None:
+        """Disable semantic search paths when documents table is unavailable."""
+        self._documents_table_available = False
+        if not self._documents_table_warning_logged:
+            logger.warning(
+                f"[ThreadSearch] Disabling semantic search embeddings because public.documents is unavailable "
+                f"(first seen in {context}): {error}"
+            )
+            self._documents_table_warning_logged = True
+
+    def _can_use_documents_table(self) -> bool:
+        """Return whether documents table-backed operations should run."""
+        return self._documents_table_available is not False
 
     @property
     def is_configured(self) -> bool:
@@ -310,6 +337,9 @@ class ThreadSearchService:
         if not self._is_configured:
             logger.debug("[ThreadSearch] Service not configured, skipping embedding")
             return False
+        if not self._can_use_documents_table():
+            logger.debug("[ThreadSearch] documents table unavailable, skipping embedding")
+            return False
 
         # Build header with project/thread context
         header = ""
@@ -366,6 +396,9 @@ class ThreadSearchService:
             return success_count > 0
 
         except Exception as e:
+            if self._is_documents_table_missing_error(e):
+                self._mark_documents_table_unavailable("embed_thread", e)
+                return False
             logger.error(f"[ThreadSearch] Embedding FAILED for thread {thread_id}: {e}")
             return False
 
@@ -388,6 +421,9 @@ class ThreadSearchService:
         """
         if not self._is_configured:
             logger.debug("[ThreadSearch] Service not configured, returning empty results")
+            return []
+        if not self._can_use_documents_table():
+            logger.debug("[ThreadSearch] documents table unavailable, returning empty search results")
             return []
 
         if not query or not query.strip():
@@ -471,6 +507,9 @@ class ThreadSearchService:
             return results
 
         except Exception as e:
+            if self._is_documents_table_missing_error(e):
+                self._mark_documents_table_unavailable("search", e)
+                return []
             logger.error(f"[ThreadSearch] Supabase search FAILED: {e}")
             return []
 
@@ -486,6 +525,8 @@ class ThreadSearchService:
         """
         if not self._is_configured:
             return True
+        if not self._can_use_documents_table():
+            return True
 
         try:
             from core.services.db import execute_mutate
@@ -497,6 +538,9 @@ class ThreadSearchService:
             return True
 
         except Exception as e:
+            if self._is_documents_table_missing_error(e):
+                self._mark_documents_table_unavailable("delete_thread_embedding", e)
+                return True
             logger.error(f"[ThreadSearch] Failed to delete embedding for thread {thread_id}: {e}")
             return False
 
@@ -562,6 +606,11 @@ async def get_threads_needing_embedding(account_id: str, thread_ids: List[str]) 
     """
     if not thread_ids:
         return set()
+    service = get_thread_search_service()
+    if not service.is_configured:
+        return set()
+    if not service._can_use_documents_table():
+        return set()
 
     try:
         from core.services.db import execute
@@ -598,9 +647,12 @@ async def get_threads_needing_embedding(account_id: str, thread_ids: List[str]) 
         logger.info(f"[ThreadSearch] Account {account_id[:8]}...: {len(result)}/{len(thread_ids)} threads need embedding")
         return result
     except Exception as e:
+        if service._is_documents_table_missing_error(e):
+            service._mark_documents_table_unavailable("get_threads_needing_embedding", e)
+            return set()
         logger.error(f"[ThreadSearch] Failed to check threads needing embedding: {e}")
-        # On error, return all thread_ids to be safe (will re-embed everything)
-        return set(thread_ids)
+        # On errors, skip background embedding to avoid hammering DB.
+        return set()
 
 
 async def embed_thread_with_messages(thread_id: str, account_id: str) -> bool:
