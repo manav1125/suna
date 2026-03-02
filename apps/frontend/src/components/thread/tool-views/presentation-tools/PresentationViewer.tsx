@@ -269,7 +269,7 @@ export function PresentationViewer({
   }, [project?.id, project?.sandbox?.id]);
 
   // Load metadata.json for the presentation with retry logic
-  const loadMetadata = useCallback(async (retryCount = 0, maxRetries = 8, forceRefresh = false) => {
+  const loadMetadata = useCallback(async (retryCount = 0, maxRetries = 5, forceRefresh = false) => {
     if (!extractedPresentationName) {
       setIsLoadingMetadata(false);
       return;
@@ -860,7 +860,7 @@ export function PresentationViewer({
             <p className="text-sm text-zinc-500 dark:text-zinc-400 text-center max-w-2xl mb-4">
               {error}
             </p>
-            <Button variant="outline" size="sm" onClick={() => loadMetadata(0, 8, true)}>
+            <Button variant="outline" size="sm" onClick={() => loadMetadata(0, 5, true)}>
               Retry
             </Button>
           </div>

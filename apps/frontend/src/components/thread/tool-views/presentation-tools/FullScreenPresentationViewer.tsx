@@ -92,7 +92,7 @@ export function FullScreenPresentationViewer({
   const totalSlides = slides.length;
 
   // Load metadata with retry logic
-  const loadMetadata = useCallback(async (retryCount = 0, maxRetries = 8) => {
+  const loadMetadata = useCallback(async (retryCount = 0, maxRetries = 5) => {
     // Don't load if we already successfully loaded metadata
     if (hasLoadedRef.current) {
       return;
@@ -173,7 +173,7 @@ export function FullScreenPresentationViewer({
 
       // Only start loading if we have the required data
       if (presentationName && sandboxUrl) {
-        loadMetadata(0, 8);
+        loadMetadata(0, 5);
       } else {
         setIsLoading(false);
       }
@@ -205,7 +205,7 @@ export function FullScreenPresentationViewer({
 
       // Add a small delay to allow the editor to save changes
       timeoutId = setTimeout(() => {
-        loadMetadata(0, 8);
+        loadMetadata(0, 5);
       }, 300);
     }
 
@@ -558,7 +558,7 @@ export function FullScreenPresentationViewer({
             <AlertTriangle className="h-10 w-10 mx-auto mb-3 text-zinc-500 dark:text-zinc-400" />
             <p className="text-zinc-700 dark:text-zinc-300 mb-3">Unable to load presentation</p>
             <p className="text-sm text-zinc-500 dark:text-zinc-400 break-words mb-4">{error}</p>
-            <Button variant="outline" size="sm" onClick={() => loadMetadata(0, 8)}>
+            <Button variant="outline" size="sm" onClick={() => loadMetadata(0, 5)}>
               Retry
             </Button>
           </div>

@@ -258,6 +258,18 @@ def _looks_like_preview_interstitial(content: bytes) -> bool:
     return any(marker in snippet for marker in markers)
 
 
+def _looks_like_html_document(content: bytes) -> bool:
+    """Detect generic HTML payloads returned where JSON/text was expected."""
+    if not content:
+        return False
+    snippet = content[:4096].decode("utf-8", errors="ignore").lstrip().lower()
+    return snippet.startswith("<!doctype html") or snippet.startswith("<html")
+
+
+def _is_json_path(path: str) -> bool:
+    return str(path or "").strip().lower().endswith(".json")
+
+
 def _build_file_read_candidates(path: str) -> List[str]:
     """
     Build candidate sandbox file paths for resilient reads.
@@ -653,9 +665,12 @@ async def read_file(
                     operation=lambda c=candidate: sandbox.fs.download_file(c),
                     operation_name=f"download_file({candidate}) from sandbox {sandbox_id}"
                 )
-                if _looks_like_preview_interstitial(content):
+                preview_interstitial = _looks_like_preview_interstitial(content)
+                html_for_json = (_is_json_path(path) or _is_json_path(candidate)) and _looks_like_html_document(content)
+                if preview_interstitial or html_for_json:
+                    reason = "preview interstitial HTML" if preview_interstitial else "unexpected HTML for JSON file"
                     logger.warning(
-                        f"download_file returned preview interstitial for {candidate} in sandbox {sandbox_id}; "
+                        f"download_file returned {reason} for {candidate} in sandbox {sandbox_id}; "
                         "retrying via shell fallback"
                     )
                     content = await _download_file_via_shell(sandbox, candidate)
@@ -723,6 +738,27 @@ async def read_file(
     except Exception as e:
         logger.error(f"Error reading file in sandbox {sandbox_id}, path {path}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@router.get("/sandboxes/{sandbox_id}/preview/{file_path:path}")
+async def preview_file(
+    sandbox_id: str,
+    file_path: str,
+    request: Request = None,
+    user_id: Optional[str] = Depends(get_optional_user_id),
+):
+    """
+    Serve sandbox files through a path-based endpoint (instead of query path)
+    so relative URLs in HTML previews resolve correctly.
+    """
+    normalized_path = normalize_path(file_path)
+    return await read_file(
+        sandbox_id=sandbox_id,
+        path=normalized_path,
+        inline=True,
+        request=request,
+        user_id=user_id,
+    )
 
 @router.delete("/sandboxes/{sandbox_id}/files")
 async def delete_file(

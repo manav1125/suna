@@ -75,7 +75,12 @@ function extractWorkspacePathFromFilePath(filePath: string): string | undefined 
   let processedPath = filePath;
 
   // If filePath is a full URL (API endpoint), extract the path parameter
-  if (filePath.includes('://') || filePath.includes('/sandboxes/') || filePath.includes('/files/content')) {
+  if (
+    filePath.includes('://') ||
+    filePath.includes('/sandboxes/') ||
+    filePath.includes('/files/content') ||
+    filePath.includes('/preview/')
+  ) {
     try {
       if (filePath.includes('://')) {
         const url = new URL(filePath);
@@ -191,11 +196,15 @@ export function constructHtmlPreviewUrl(
     const backendBase = normalizeBackendBaseUrl(options.backendUrl);
     if (backendBase) {
       try {
-        const proxyUrl = new URL(`${backendBase}/sandboxes/${effectiveSandboxId}/files/content`);
-        proxyUrl.searchParams.set('path', workspacePath);
-        if (options.inline ?? true) {
-          proxyUrl.searchParams.set('inline', 'true');
-        }
+        const proxyPath = workspacePath
+          .replace(/^\/+/, '')
+          .split('/')
+          .filter(Boolean)
+          .map((segment) => encodeURIComponent(segment))
+          .join('/');
+        if (!proxyPath) return undefined;
+
+        const proxyUrl = new URL(`${backendBase}/sandboxes/${effectiveSandboxId}/preview/${proxyPath}`);
         if (options.accessToken) {
           proxyUrl.searchParams.set('token', options.accessToken);
         }

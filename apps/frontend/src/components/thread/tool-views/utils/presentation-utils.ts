@@ -21,7 +21,7 @@ interface FetchPresentationMetadataOptions {
   signal?: AbortSignal;
 }
 
-const PRESENTATION_METADATA_TIMEOUT_MS = 20000;
+const PRESENTATION_METADATA_TIMEOUT_MS = 8000;
 
 function getErrorSnippet(text: string): string {
   return text
@@ -51,19 +51,6 @@ function withCacheBust(url: string): string {
     return parsed.toString();
   } catch {
     return `${url}${url.includes('?') ? '&' : '?'}t=${Date.now()}`;
-  }
-}
-
-function shouldUseDirectSandboxFallback(sandboxUrl: string | undefined): boolean {
-  if (!sandboxUrl) return false;
-  try {
-    const hostname = new URL(sandboxUrl).hostname.toLowerCase();
-    // Daytona preview hosts often return HTML warning/interstitial content for direct fetches.
-    return !(hostname.includes('daytona') || hostname.includes('proxy'));
-  } catch {
-    // If URL parsing fails, avoid direct fallback; malformed sandbox URLs should not
-    // silently route to a less reliable direct fetch path.
-    return false;
   }
 }
 
@@ -113,13 +100,26 @@ export async function fetchPresentationMetadata({
     effectiveAccessToken = (await getAuthTokenWithTimeout(8000)) || undefined;
   }
 
-  const backendBaseUrls = new Set<string>();
-  if (process.env.NEXT_PUBLIC_BACKEND_URL) {
-    backendBaseUrls.add(process.env.NEXT_PUBLIC_BACKEND_URL);
+  const backendBaseUrls: string[] = [];
+  const explicitBackendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
+  if (explicitBackendUrl) {
+    backendBaseUrls.push(explicitBackendUrl);
   }
   if (typeof window !== 'undefined') {
-    // Fallback for deployments that proxy backend under /v1 on the same origin.
-    backendBaseUrls.add('/v1');
+    // Keep same-origin /v1 only when no explicit backend URL is configured
+    // or when the explicit backend already resolves to the same origin.
+    let shouldAddSameOriginFallback = !explicitBackendUrl;
+    if (explicitBackendUrl) {
+      try {
+        const parsed = new URL(explicitBackendUrl, window.location.origin);
+        shouldAddSameOriginFallback = parsed.origin === window.location.origin;
+      } catch {
+        shouldAddSameOriginFallback = true;
+      }
+    }
+    if (shouldAddSameOriginFallback) {
+      backendBaseUrls.push('/v1');
+    }
   }
 
   if (effectiveSandboxId) {
@@ -136,16 +136,6 @@ export async function fetchPresentationMetadata({
           apiUrl.searchParams.append('token', effectiveAccessToken);
         }
         candidates.push({ url: apiUrl.toString() });
-
-        // Keep an Authorization-header fallback for environments where query token is disabled.
-        if (effectiveAccessToken) {
-          const headerAuthUrl = new URL(apiUrl.toString());
-          headerAuthUrl.searchParams.delete('token');
-          candidates.push({
-            url: headerAuthUrl.toString(),
-            headers: { Authorization: `Bearer ${effectiveAccessToken}` },
-          });
-        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         errors.push(`invalid backend URL (${backendUrl}): ${message}`);
@@ -153,8 +143,9 @@ export async function fetchPresentationMetadata({
     }
   }
 
-  // Keep direct sandbox metadata URL only for non-Daytona hosts.
-  if (normalizedSandboxUrl && (candidates.length === 0 || shouldUseDirectSandboxFallback(normalizedSandboxUrl))) {
+  // Only use direct sandbox metadata URL when backend candidates are unavailable.
+  // Direct Daytona proxy fetches can return HTML interstitials/non-JSON payloads.
+  if (normalizedSandboxUrl && candidates.length === 0) {
     candidates.push({ url: `${normalizedSandboxUrl}/presentations/${sanitizedName}/metadata.json` });
   }
 
