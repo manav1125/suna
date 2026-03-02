@@ -3,6 +3,7 @@ interface HtmlPreviewUrlOptions {
   accessToken?: string;
   preferBackendProxy?: boolean;
   inline?: boolean;
+  backendUrl?: string;
 }
 
 export function normalizeSandboxBaseUrl(sandboxUrl: string | undefined): string | undefined {
@@ -13,10 +14,12 @@ export function normalizeSandboxBaseUrl(sandboxUrl: string | undefined): string 
     const hostname = parsed.hostname.toLowerCase();
     const isDaytonaHost = hostname.includes('daytona');
     const isProxyHost = hostname.includes('proxy');
+
     if (parsed.protocol === 'http:' && (isDaytonaHost || isProxyHost)) {
       parsed.protocol = 'https:';
       return parsed.toString().replace(/\/+$/, '');
     }
+
     return sandboxUrl.replace(/\/+$/, '');
   } catch {
     return sandboxUrl.replace(/\/+$/, '');
@@ -25,6 +28,8 @@ export function normalizeSandboxBaseUrl(sandboxUrl: string | undefined): string 
 
 export function extractSandboxIdFromSandboxUrl(sandboxUrl: string | undefined): string | undefined {
   if (!sandboxUrl) return undefined;
+
+  const uuidRegex = /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
 
   try {
     const parsed = new URL(sandboxUrl);
@@ -48,13 +53,14 @@ export function extractSandboxIdFromSandboxUrl(sandboxUrl: string | undefined): 
     }
 
     // Fallback for UUID-looking host labels on non-Daytona custom domains.
-    const uuidMatch = firstLabel.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i);
-    if (uuidMatch?.[0]) return uuidMatch[0];
+    const hostUuidMatch = firstLabel.match(uuidRegex);
+    if (hostUuidMatch?.[0]) return hostUuidMatch[0];
   } catch {
-    return undefined;
+    // no-op
   }
 
-  return undefined;
+  const rawUuidMatch = sandboxUrl.match(uuidRegex);
+  return rawUuidMatch?.[0];
 }
 
 function safeDecodeURIComponent(value: string): string {
@@ -71,7 +77,6 @@ function extractWorkspacePathFromFilePath(filePath: string): string | undefined 
   // If filePath is a full URL (API endpoint), extract the path parameter
   if (filePath.includes('://') || filePath.includes('/sandboxes/') || filePath.includes('/files/content')) {
     try {
-      // Try to parse as URL if it's a full URL
       if (filePath.includes('://')) {
         const url = new URL(filePath);
         const pathParam = url.searchParams.get('path');
@@ -95,42 +100,36 @@ function extractWorkspacePathFromFilePath(filePath: string): string | undefined 
             } else if (presentationsIndex >= 0) {
               processedPath = pathname.slice(presentationsIndex);
             } else {
-              // If no path param, try to extract from pathname
-              // Handle patterns like /v1/sandboxes/.../files/content?path=...
               const pathMatch = filePath.match(/[?&]path=([^&]+)/);
               if (pathMatch) {
                 processedPath = safeDecodeURIComponent(pathMatch[1]);
               } else {
-                // If it's a relative URL with /sandboxes/ pattern, extract the path
                 const sandboxMatch = filePath.match(/\/sandboxes\/[^\/]+\/files\/content[?&]path=([^&]+)/);
                 if (sandboxMatch) {
                   processedPath = safeDecodeURIComponent(sandboxMatch[1]);
+                } else if (
+                  pathname.endsWith('.html') ||
+                  pathname.endsWith('.htm') ||
+                  pathname.endsWith('.json')
+                ) {
+                  processedPath = pathname;
                 } else {
-                  // If this looks like a direct HTML/JSON file URL, use pathname as-is.
-                  if (pathname.endsWith('.html') || pathname.endsWith('.htm') || pathname.endsWith('.json')) {
-                    processedPath = pathname;
-                  } else {
-                    // Can't extract path
-                    return undefined;
-                  }
+                  return undefined;
                 }
               }
             }
           }
         }
       } else {
-        // Relative URL pattern: /sandboxes/.../files/content?path=...
         const pathMatch = filePath.match(/[?&]path=([^&]+)/);
         if (pathMatch) {
           processedPath = safeDecodeURIComponent(pathMatch[1]);
         } else {
-          // Can't extract path
           return undefined;
         }
       }
-    } catch (e) {
+    } catch {
       // If URL parsing fails, treat as regular path
-      console.warn('Failed to parse filePath as URL, treating as regular path:', filePath);
     }
   }
 
@@ -142,6 +141,25 @@ function extractWorkspacePathFromFilePath(filePath: string): string | undefined 
   }
 
   return processedPath;
+}
+
+function normalizeBackendBaseUrl(backendUrl?: string): string | undefined {
+  const raw =
+    backendUrl ||
+    process.env.NEXT_PUBLIC_BACKEND_URL ||
+    (typeof window !== 'undefined' ? `${window.location.origin}/v1` : undefined);
+
+  if (!raw) return undefined;
+
+  if (raw.startsWith('http')) {
+    return raw.replace(/\/+$/, '');
+  }
+
+  if (typeof window !== 'undefined') {
+    return `${window.location.origin}${raw.startsWith('/') ? '' : '/'}${raw}`.replace(/\/+$/, '');
+  }
+
+  return undefined;
 }
 
 /**
@@ -169,41 +187,34 @@ export function constructHtmlPreviewUrl(
   }
 
   const effectiveSandboxId = options?.sandboxId || extractSandboxIdFromSandboxUrl(normalizedSandboxUrl);
-
   if (options?.preferBackendProxy && effectiveSandboxId) {
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || '';
-    if (backendUrl) {
+    const backendBase = normalizeBackendBaseUrl(options.backendUrl);
+    if (backendBase) {
       try {
-        const normalizedBackendUrl = backendUrl.startsWith('http')
-          ? backendUrl
-          : `${typeof window !== 'undefined' ? window.location.origin : ''}${backendUrl.startsWith('/') ? '' : '/'}${backendUrl}`;
-        const apiUrl = new URL(`${normalizedBackendUrl.replace(/\/+$/, '')}/sandboxes/${effectiveSandboxId}/files/content`);
-        apiUrl.searchParams.append('path', workspacePath);
+        const proxyUrl = new URL(`${backendBase}/sandboxes/${effectiveSandboxId}/files/content`);
+        proxyUrl.searchParams.set('path', workspacePath);
+        if (options.inline ?? true) {
+          proxyUrl.searchParams.set('inline', 'true');
+        }
         if (options.accessToken) {
-          apiUrl.searchParams.append('token', options.accessToken);
+          proxyUrl.searchParams.set('token', options.accessToken);
         }
-        if (options.inline !== false) {
-          apiUrl.searchParams.append('inline', 'true');
-        }
-        return apiUrl.toString();
-      } catch (e) {
-        console.warn('Failed to build backend HTML preview URL, falling back to sandbox URL:', e);
+        return proxyUrl.toString();
+      } catch {
+        // Fall through to direct sandbox preview URL.
       }
     }
   }
 
   let processedPath = workspacePath;
-
-  // Remove /workspace/ prefix if present
+  // Remove /workspace/ prefix for direct sandbox path rendering.
   processedPath = processedPath.replace(/^\/workspace\//, '');
 
-  // Split the path into segments and encode each segment individually
   const pathSegments = processedPath
     .split('/')
-    .filter(Boolean) // Remove empty segments
+    .filter(Boolean)
     .map((segment) => encodeURIComponent(segment));
 
-  // Join the segments back together with forward slashes
   const encodedPath = pathSegments.join('/');
 
   return `${normalizedSandboxUrl}/${encodedPath}`;
@@ -224,7 +235,6 @@ export function withQueryParam(
     parsed.searchParams.set(key, String(value));
     return parsed.toString();
   } catch {
-    // Fallback for malformed or relative URLs
     const separator = url.includes('?') ? '&' : '?';
     return `${url}${separator}${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`;
   }

@@ -21,7 +21,7 @@ interface FetchPresentationMetadataOptions {
   signal?: AbortSignal;
 }
 
-const PRESENTATION_METADATA_TIMEOUT_MS = 12000;
+const PRESENTATION_METADATA_TIMEOUT_MS = 20000;
 
 function getErrorSnippet(text: string): string {
   return text
@@ -61,7 +61,9 @@ function shouldUseDirectSandboxFallback(sandboxUrl: string | undefined): boolean
     // Daytona preview hosts often return HTML warning/interstitial content for direct fetches.
     return !(hostname.includes('daytona') || hostname.includes('proxy'));
   } catch {
-    return true;
+    // If URL parsing fails, avoid direct fallback; malformed sandbox URLs should not
+    // silently route to a less reliable direct fetch path.
+    return false;
   }
 }
 
@@ -111,33 +113,43 @@ export async function fetchPresentationMetadata({
     effectiveAccessToken = (await getAuthTokenWithTimeout(8000)) || undefined;
   }
 
-  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || '';
-  if (backendUrl && effectiveSandboxId) {
-    try {
-      const normalizedBackendUrl = backendUrl.startsWith('http')
-        ? backendUrl
-        : `${typeof window !== 'undefined' ? window.location.origin : ''}${backendUrl.startsWith('/') ? '' : '/'}${backendUrl}`;
-      const apiUrl = new URL(`${normalizedBackendUrl.replace(/\/+$/, '')}/sandboxes/${effectiveSandboxId}/files/content`);
-      apiUrl.searchParams.append('path', `/workspace/presentations/${sanitizedName}/metadata.json`);
-      apiUrl.searchParams.append('inline', 'true');
-      // Query token avoids CORS preflight/header stripping issues in iframe/fetch contexts.
-      if (effectiveAccessToken) {
-        apiUrl.searchParams.append('token', effectiveAccessToken);
-      }
-      candidates.push({ url: apiUrl.toString() });
+  const backendBaseUrls = new Set<string>();
+  if (process.env.NEXT_PUBLIC_BACKEND_URL) {
+    backendBaseUrls.add(process.env.NEXT_PUBLIC_BACKEND_URL);
+  }
+  if (typeof window !== 'undefined') {
+    // Fallback for deployments that proxy backend under /v1 on the same origin.
+    backendBaseUrls.add('/v1');
+  }
 
-      // Keep an Authorization-header fallback for environments where query token is disabled.
-      if (effectiveAccessToken) {
-        const headerAuthUrl = new URL(apiUrl.toString());
-        headerAuthUrl.searchParams.delete('token');
-        candidates.push({
-          url: headerAuthUrl.toString(),
-          headers: { Authorization: `Bearer ${effectiveAccessToken}` },
-        });
+  if (effectiveSandboxId) {
+    for (const backendUrl of backendBaseUrls) {
+      try {
+        const normalizedBackendUrl = backendUrl.startsWith('http')
+          ? backendUrl
+          : `${typeof window !== 'undefined' ? window.location.origin : ''}${backendUrl.startsWith('/') ? '' : '/'}${backendUrl}`;
+        const apiUrl = new URL(`${normalizedBackendUrl.replace(/\/+$/, '')}/sandboxes/${effectiveSandboxId}/files/content`);
+        apiUrl.searchParams.append('path', `/workspace/presentations/${sanitizedName}/metadata.json`);
+        apiUrl.searchParams.append('inline', 'true');
+        // Query token avoids CORS preflight/header stripping issues in iframe/fetch contexts.
+        if (effectiveAccessToken) {
+          apiUrl.searchParams.append('token', effectiveAccessToken);
+        }
+        candidates.push({ url: apiUrl.toString() });
+
+        // Keep an Authorization-header fallback for environments where query token is disabled.
+        if (effectiveAccessToken) {
+          const headerAuthUrl = new URL(apiUrl.toString());
+          headerAuthUrl.searchParams.delete('token');
+          candidates.push({
+            url: headerAuthUrl.toString(),
+            headers: { Authorization: `Bearer ${effectiveAccessToken}` },
+          });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        errors.push(`invalid backend URL (${backendUrl}): ${message}`);
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      errors.push(`invalid backend URL (${backendUrl}): ${message}`);
     }
   }
 
@@ -209,7 +221,6 @@ export async function fetchPresentationMetadata({
 
   throw new Error(`Failed to load presentation metadata. ${errors.join(' | ')}`);
 }
-
 /**
  * Utility functions for handling presentation slide file paths
  */
