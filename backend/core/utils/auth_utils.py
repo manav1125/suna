@@ -28,6 +28,94 @@ _jwks_cache_time: float = 0
 _jwks_cache_ttl: int = 3600  # Cache for 1 hour
 
 
+async def _validate_token_with_supabase_userinfo(token: str) -> dict:
+    """
+    Validate a JWT by asking Supabase Auth directly.
+    Used as a fallback when local HS256 verification is unavailable or fails.
+    """
+    supabase_url = (config.SUPABASE_URL or "").rstrip("/")
+    if not supabase_url:
+        raise HTTPException(
+            status_code=500,
+            detail="Server authentication configuration error",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    userinfo_url = f"{supabase_url}/auth/v1/user"
+    api_key_candidates = []
+    if config.SUPABASE_ANON_KEY:
+        api_key_candidates.append(config.SUPABASE_ANON_KEY)
+    if config.SUPABASE_SERVICE_ROLE_KEY and config.SUPABASE_SERVICE_ROLE_KEY not in api_key_candidates:
+        api_key_candidates.append(config.SUPABASE_SERVICE_ROLE_KEY)
+
+    last_http_error: Optional[HTTPException] = None
+    for api_key in api_key_candidates or [""]:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        }
+        if api_key:
+            headers["apikey"] = api_key
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(userinfo_url, headers=headers)
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=503,
+                detail="Authentication service timeout",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        except Exception as exc:
+            logger.warning(f"Supabase auth fallback request failed: {exc}")
+            continue
+
+        if response.status_code == 200:
+            try:
+                data = response.json()
+            except Exception:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid token",
+                    headers={"WWW-Authenticate": "Bearer"}
+                )
+
+            user_id = data.get("id") or data.get("sub")
+            if not user_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid token",
+                    headers={"WWW-Authenticate": "Bearer"}
+                )
+
+            # Return minimal JWT-like payload expected by downstream code.
+            payload = {"sub": user_id}
+            if isinstance(data.get("email"), str):
+                payload["email"] = data.get("email")
+            if isinstance(data.get("role"), str):
+                payload["role"] = data.get("role")
+            return payload
+
+        if response.text:
+            detail = " ".join(response.text.split())[:140]
+        else:
+            detail = f"HTTP {response.status_code}"
+        last_http_error = HTTPException(
+            status_code=401,
+            detail=f"Invalid token ({detail})",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    if last_http_error:
+        raise last_http_error
+
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid token",
+        headers={"WWW-Authenticate": "Bearer"}
+    )
+
+
 async def _fetch_jwks() -> Dict:
     """
     Fetch JWKS (JSON Web Key Set) from Supabase for ES256 token verification.
@@ -218,11 +306,10 @@ async def _decode_jwt_with_verification_async(token: str) -> dict:
         jwt_secret = config.SUPABASE_JWT_SECRET
         
         if not jwt_secret:
-            logger.error("SUPABASE_JWT_SECRET is not configured - JWT verification disabled!")
-            raise HTTPException(
-                status_code=500,
-                detail="Server authentication configuration error"
+            logger.warning(
+                "SUPABASE_JWT_SECRET is not configured - using Supabase /auth/v1/user fallback verification"
             )
+            return await _validate_token_with_supabase_userinfo(token)
         
         try:
             return jwt.decode(
@@ -243,14 +330,14 @@ async def _decode_jwt_with_verification_async(token: str) -> dict:
                 headers={"WWW-Authenticate": "Bearer"}
             )
         except jwt.InvalidSignatureError:
-            logger.warning("JWT signature verification failed (HS256) - possible token forgery attempt")
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid token signature",
-                headers={"WWW-Authenticate": "Bearer"}
+            logger.warning(
+                "JWT signature verification failed (HS256); attempting Supabase /auth/v1/user fallback verification"
             )
+            return await _validate_token_with_supabase_userinfo(token)
         except PyJWTError as e:
             logger.warning(f"JWT decode error (HS256): {e}")
+            if "signature" in str(e).lower():
+                return await _validate_token_with_supabase_userinfo(token)
             raise HTTPException(
                 status_code=401,
                 detail="Invalid token",
