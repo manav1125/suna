@@ -188,10 +188,50 @@ def _get_dsn() -> str:
     password = os.getenv("POSTGRES_PASSWORD")
     if not password:
         raise RuntimeError("DATABASE_URL, DATABASE_POOLER_URL, or POSTGRES_PASSWORD required")
-    
-    # URL-encode password when constructing URL from components
+
+    # Fallback (only used when DATABASE_URL / DATABASE_POOLER_URL are not provided):
+    # Build a valid direct Postgres DSN using standard Supabase host naming.
+    db_user = os.getenv("SUPABASE_DB_USER", "postgres")
+    db_name = os.getenv("SUPABASE_DB_NAME", "postgres")
+    db_host = os.getenv("SUPABASE_DB_HOST", f"db.{project_ref}.supabase.co")
+    db_port = os.getenv("SUPABASE_DB_PORT", "5432")
+
+    encoded_user = quote(db_user, safe='')
     encoded_password = quote(password, safe='')
-    return f"postgresql+psycopg://postgres.{project_ref}:{encoded_password}.supabase.com:6543/postgres"
+    encoded_db_name = quote(db_name, safe='')
+    return f"postgresql+psycopg://{encoded_user}:{encoded_password}@{db_host}:{db_port}/{encoded_db_name}"
+
+
+def _get_dsn_parts(dsn: str) -> tuple[str, Optional[int]]:
+    """Best-effort hostname/port extraction that tolerates malformed DSNs."""
+    try:
+        parsed = urlparse(dsn)
+        host = (parsed.hostname or "").lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        return host, port
+    except Exception:
+        return "", None
+
+
+def _is_supabase_pooler_dsn(dsn: str) -> bool:
+    host, _ = _get_dsn_parts(dsn)
+    return "pooler.supabase.com" in host
+
+
+def _is_transaction_pooler_dsn(dsn: str) -> bool:
+    """
+    Detect Supabase transaction pooler (typically port 6543).
+    Session pooler (typically 5432) should use app-side pooling.
+    """
+    host, port = _get_dsn_parts(dsn)
+    if "pooler.supabase.com" not in host:
+        return False
+    if port is None:
+        return ":6543" in dsn
+    return port == 6543
 
 
 def _get_read_replica_dsn() -> Optional[str]:
@@ -328,16 +368,26 @@ async def init_db() -> None:
     
     # Initialize primary database (for writes)
     dsn = _get_dsn()
-    is_supavisor = "pooler.supabase.com" in dsn or ":6543" in dsn
+    is_supabase_pooler = _is_supabase_pooler_dsn(dsn)
+    is_transaction_pooler = _is_transaction_pooler_dsn(dsn)
     
     connect_args = {
         "connect_timeout": CONNECT_TIMEOUT,
         "prepare_threshold": None,
+        "keepalives": 1,
+        "keepalives_idle": int(os.getenv("POSTGRES_KEEPALIVES_IDLE", "30")),
+        "keepalives_interval": int(os.getenv("POSTGRES_KEEPALIVES_INTERVAL", "10")),
+        "keepalives_count": int(os.getenv("POSTGRES_KEEPALIVES_COUNT", "5")),
+        "application_name": os.getenv("POSTGRES_APPLICATION_NAME", "suna-backend"),
     }
-    if not is_supavisor:
+    if not is_transaction_pooler:
         connect_args["options"] = f"-c statement_timeout={STATEMENT_TIMEOUT} -c lock_timeout=5000"
     
-    use_nullpool = USE_NULLPOOL == "true" or (USE_NULLPOOL == "auto" and is_supavisor)
+    if USE_NULLPOOL == "auto":
+        # Keep local behavior conservative, but prefer pooled connections in staging/prod.
+        use_nullpool = (config.ENV_MODE == EnvMode.LOCAL and is_transaction_pooler)
+    else:
+        use_nullpool = USE_NULLPOOL == "true"
     execution_opts = {"prepared_statement_cache_size": 0}
     
     if use_nullpool:
@@ -370,16 +420,24 @@ async def init_db() -> None:
     read_dsn = _get_read_replica_dsn()
     if read_dsn:
         _has_read_replica = True
-        is_supavisor_read = "pooler.supabase.com" in read_dsn or ":6543" in read_dsn
+        is_transaction_pooler_read = _is_transaction_pooler_dsn(read_dsn)
         
         connect_args_read = {
             "connect_timeout": CONNECT_TIMEOUT,
             "prepare_threshold": None,
+            "keepalives": 1,
+            "keepalives_idle": int(os.getenv("POSTGRES_KEEPALIVES_IDLE", "30")),
+            "keepalives_interval": int(os.getenv("POSTGRES_KEEPALIVES_INTERVAL", "10")),
+            "keepalives_count": int(os.getenv("POSTGRES_KEEPALIVES_COUNT", "5")),
+            "application_name": os.getenv("POSTGRES_APPLICATION_NAME", "suna-backend-read"),
         }
-        if not is_supavisor_read:
+        if not is_transaction_pooler_read:
             connect_args_read["options"] = f"-c statement_timeout={STATEMENT_TIMEOUT} -c lock_timeout=5000"
         
-        use_nullpool_read = USE_NULLPOOL == "true" or (USE_NULLPOOL == "auto" and is_supavisor_read)
+        if USE_NULLPOOL == "auto":
+            use_nullpool_read = (config.ENV_MODE == EnvMode.LOCAL and is_transaction_pooler_read)
+        else:
+            use_nullpool_read = USE_NULLPOOL == "true"
         
         if use_nullpool_read:
             _read_engine = create_async_engine(
@@ -410,13 +468,25 @@ async def init_db() -> None:
         try:
             async with _read_engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
-            logger.info(f"✅ Database initialized | Primary: {pool_info} | Read Replica: {read_pool_info} ✓ | timeout={STATEMENT_TIMEOUT}ms")
+            logger.info(
+                f"✅ Database initialized | Primary: {pool_info} "
+                f"(pooler={is_supabase_pooler}, tx_pooler={is_transaction_pooler}) | "
+                f"Read Replica: {read_pool_info} ✓ | timeout={STATEMENT_TIMEOUT}ms"
+            )
         except Exception as e:
             logger.warning(f"⚠️ Read replica connection test failed: {e}. Will fallback to primary for reads.")
-            logger.info(f"✅ Database initialized | Primary: {pool_info} | Read Replica: CONFIGURED BUT UNREACHABLE | timeout={STATEMENT_TIMEOUT}ms")
+            logger.info(
+                f"✅ Database initialized | Primary: {pool_info} "
+                f"(pooler={is_supabase_pooler}, tx_pooler={is_transaction_pooler}) | "
+                f"Read Replica: CONFIGURED BUT UNREACHABLE | timeout={STATEMENT_TIMEOUT}ms"
+            )
     else:
         _has_read_replica = False
-        logger.info(f"✅ Database initialized | {pool_info} | timeout={STATEMENT_TIMEOUT}ms | No read replica configured")
+        logger.info(
+            f"✅ Database initialized | {pool_info} "
+            f"(pooler={is_supabase_pooler}, tx_pooler={is_transaction_pooler}) | "
+            f"timeout={STATEMENT_TIMEOUT}ms | No read replica configured"
+        )
 
 
 async def close_db() -> None:

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Monitor, Code, ExternalLink } from 'lucide-react';
 import { constructHtmlPreviewUrl } from '@/lib/utils/url';
 import { IframePreview } from '@/components/thread/iframe-preview';
+import { useAuth } from '@/components/AuthProvider';
 
 interface FileRendererProject {
   id?: string;
@@ -36,9 +37,9 @@ export function HtmlRenderer({
 }: HtmlRendererProps) {
   // Always default to 'preview' mode
   const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
+  const { session } = useAuth();
 
-  // Check if previewUrl is already a valid sandbox preview URL (not an API endpoint)
-  const isAlreadySandboxUrl = useMemo(() => {
+  const isDirectSandboxUrl = useMemo(() => {
     if (!previewUrl) return false;
     const isFullUrl = previewUrl.includes('://');
     const isApiEndpoint = previewUrl.includes('/sandboxes/') || previewUrl.includes('/files/content');
@@ -47,12 +48,12 @@ export function HtmlRenderer({
 
   // Create a blob URL for HTML content if no sandbox is available (fallback)
   const blobHtmlUrl = useMemo(() => {
-    if (content && !project?.sandbox?.sandbox_url && !isAlreadySandboxUrl) {
+    if (content && !project?.sandbox?.sandbox_url && !isDirectSandboxUrl) {
       const blob = new Blob([content], { type: 'text/html' });
       return URL.createObjectURL(blob);
     }
     return undefined;
-  }, [content, project?.sandbox?.sandbox_url, isAlreadySandboxUrl]);
+  }, [content, project?.sandbox?.sandbox_url, isDirectSandboxUrl]);
 
   // Clean up blob URL on unmount
   useEffect(() => {
@@ -63,14 +64,27 @@ export function HtmlRenderer({
     };
   }, [blobHtmlUrl]);
 
-  // Extract file path from previewUrl if it's a full API URL
+  // Extract file path from previewUrl when possible.
   const filePath = useMemo(() => {
-    // If previewUrl is already a sandbox URL, no need to extract path
-    if (isAlreadySandboxUrl) {
-      return '';
-    }
-
     try {
+      if (!previewUrl) return '';
+
+      if (previewUrl.includes('://')) {
+        const url = new URL(previewUrl);
+        const pathParam = url.searchParams.get('path');
+        if (pathParam) {
+          const decodedPath = decodeURIComponent(pathParam);
+          return decodedPath.replace(/^\/workspace\//, '');
+        }
+        const pathName = decodeURIComponent(url.pathname || '');
+        if (pathName.startsWith('/workspace/')) {
+          return pathName.replace(/^\/workspace\//, '');
+        }
+        if (pathName.startsWith('/')) {
+          return pathName.slice(1);
+        }
+      }
+
       // If it's an API URL (check for various patterns: /api/sandboxes/, /sandboxes/, /v1/sandboxes/)
       if (previewUrl.includes('/sandboxes/') && previewUrl.includes('/files/content')) {
         // Try to extract path parameter from query string
@@ -113,20 +127,45 @@ export function HtmlRenderer({
       console.error('Error extracting file path from previewUrl:', e, { previewUrl });
       return '';
     }
-  }, [previewUrl, isAlreadySandboxUrl]);
+  }, [previewUrl]);
+
+  const sandboxBaseUrl = useMemo(() => {
+    if (project?.sandbox?.sandbox_url) return project.sandbox.sandbox_url;
+    if (isDirectSandboxUrl) {
+      try {
+        const parsed = new URL(previewUrl);
+        return `${parsed.protocol}//${parsed.host}`;
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }, [project?.sandbox?.sandbox_url, isDirectSandboxUrl, previewUrl]);
+
+  const authenticatedPreviewUrl = useMemo(() => {
+    if (!sandboxBaseUrl) return undefined;
+    const sourcePath = filePath || previewUrl;
+    if (!sourcePath) return undefined;
+    return constructHtmlPreviewUrl(sandboxBaseUrl, sourcePath, {
+      preferBackendProxy: true,
+      sandboxId: project?.sandbox?.id,
+      accessToken: session?.access_token,
+      inline: true,
+    });
+  }, [sandboxBaseUrl, filePath, previewUrl, project?.sandbox?.id, session?.access_token]);
+
+  const directPreviewUrl = useMemo(() => {
+    if (isDirectSandboxUrl) return previewUrl;
+    if (!sandboxBaseUrl || !filePath) return undefined;
+    return constructHtmlPreviewUrl(sandboxBaseUrl, filePath);
+  }, [isDirectSandboxUrl, previewUrl, sandboxBaseUrl, filePath]);
 
   // Construct HTML file preview URL using the sandbox URL and file path
   const htmlPreviewUrl = useMemo(() => {
-    // If previewUrl is already a valid sandbox URL, use it directly
-    if (isAlreadySandboxUrl) {
-      return previewUrl;
-    }
+    // Prefer backend proxy path to avoid Daytona preview interstitial HTML.
+    if (authenticatedPreviewUrl) return authenticatedPreviewUrl;
 
-    // Construct preview URL if we have both sandbox URL and a valid file path
-    if (project?.sandbox?.sandbox_url && filePath && !filePath.includes('://') && !filePath.includes('/sandboxes/')) {
-      const constructedUrl = constructHtmlPreviewUrl(project.sandbox.sandbox_url, filePath);
-      return constructedUrl;
-    }
+    if (directPreviewUrl) return directPreviewUrl;
 
     // Fall back to blob URL if available
     if (blobHtmlUrl) {
@@ -140,7 +179,7 @@ export function HtmlRenderer({
 
     // No valid preview URL available
     return '';
-  }, [project?.sandbox?.sandbox_url, filePath, previewUrl, isAlreadySandboxUrl, blobHtmlUrl]);
+  }, [authenticatedPreviewUrl, directPreviewUrl, blobHtmlUrl, previewUrl]);
 
   return (
     <div className={cn('w-full h-full flex flex-col', className)}>
