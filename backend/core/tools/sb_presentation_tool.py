@@ -835,7 +835,9 @@ class SandboxPresentationTool(SandboxToolsBase):
             if presentation_path:
                 safe_name = self._sanitize_filename(presentation_name)
                 response_data["presentation_path"] = f"{self.presentations_dir}/{safe_name}"
-                response_data["presentation_name"] = presentation_name.lower()
+                # Always return the actual workspace folder name to avoid
+                # downstream path mismatches when the original name had spaces/symbols.
+                response_data["presentation_name"] = safe_name
                 response_data["copied_to_workspace"] = True
                 response_data["requires_follow_up_edit"] = True
                 response_data["required_next_tool"] = "full_file_rewrite"

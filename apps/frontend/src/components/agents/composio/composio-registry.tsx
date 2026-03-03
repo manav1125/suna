@@ -55,6 +55,9 @@ interface ComposioRegistryProps {
   onBlockedClick?: () => void;
 }
 
+const canonicalizeToolkitSlug = (slug?: string): string =>
+  (slug || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
 const getAgentConnectedApps = (
   agent: any,
   profiles: ComposioProfile[],
@@ -67,7 +70,10 @@ const getAgentConnectedApps = (
   agent.custom_mcps.forEach((mcpConfig: any) => {
     if (mcpConfig.config?.profile_id) {
       const profile = profiles.find(p => p.profile_id === mcpConfig.config.profile_id);
-      const toolkit = toolkits.find(t => t.slug === profile?.toolkit_slug);
+      const profileToolkitKey = canonicalizeToolkitSlug(profile?.toolkit_slug);
+      const toolkit = toolkits.find(
+        (t) => canonicalizeToolkitSlug(t.slug) === profileToolkitKey,
+      );
       if (profile && toolkit) {
         connectedApps.push({
           toolkit,
@@ -87,11 +93,12 @@ const isAppConnectedToAgent = (
   profiles: ComposioProfile[]
 ): boolean => {
   if (!agent?.custom_mcps) return false;
+  const appKey = canonicalizeToolkitSlug(appSlug);
 
   return agent.custom_mcps.some((mcpConfig: any) => {
     if (mcpConfig.config?.profile_id) {
       const profile = profiles.find(p => p.profile_id === mcpConfig.config.profile_id);
-      return profile?.toolkit_slug === appSlug;
+      return canonicalizeToolkitSlug(profile?.toolkit_slug) === appKey;
     }
     return false;
   });
@@ -204,6 +211,7 @@ const AppCard = ({ app, profiles, onConnect, onConfigure, isConnectedToAgent, cu
   onBlockedClick?: () => void;
 }) => {
   const connectedProfiles = profiles.filter(p => p.is_connected);
+  const preferredConnectedProfile = connectedProfiles.find((profile) => profile.is_default) || connectedProfiles[0];
   const canConnect = mode === 'profile-only' ? true : (!isConnectedToAgent && currentAgentId);
 
   const getStatusInfo = () => {
@@ -212,14 +220,14 @@ const AppCard = ({ app, profiles, onConnect, onConfigure, isConnectedToAgent, cu
     }
     if (mode === 'profile-only') {
       return connectedProfiles.length > 0
-        ? { text: `${connectedProfiles.length} profile${connectedProfiles.length !== 1 ? 's' : ''}`, color: 'text-green-600 dark:text-green-400' }
+        ? { text: `${connectedProfiles.length} connected profile${connectedProfiles.length !== 1 ? 's' : ''}`, color: 'text-green-600 dark:text-green-400' }
         : { text: 'Not connected', color: 'text-muted-foreground' };
     }
     if (isConnectedToAgent) {
-      return { text: 'Connected', color: 'text-blue-600 dark:text-blue-400' };
+      return { text: 'Connected to Worker', color: 'text-blue-600 dark:text-blue-400' };
     }
     if (connectedProfiles.length > 0) {
-      return { text: `${connectedProfiles.length} profile${connectedProfiles.length !== 1 ? 's' : ''}`, color: 'text-green-600 dark:text-green-400' };
+      return { text: `${connectedProfiles.length} profile${connectedProfiles.length !== 1 ? 's' : ''} available`, color: 'text-green-600 dark:text-green-400' };
     }
     return { text: 'Not connected', color: 'text-muted-foreground' };
   };
@@ -233,7 +241,10 @@ const AppCard = ({ app, profiles, onConnect, onConfigure, isConnectedToAgent, cu
     }
     if (!canConnect) return;
     if (connectedProfiles.length > 0) {
-      onConfigure(connectedProfiles[0]);
+      const profileToUse = preferredConnectedProfile || connectedProfiles[0];
+      if (profileToUse) {
+        onConfigure(profileToUse);
+      }
     } else {
       onConnect();
     }
@@ -348,10 +359,11 @@ export const ComposioRegistry: React.FC<ComposioRegistryProps> = ({
     const grouped: Record<string, ComposioProfile[]> = {};
     profiles?.forEach(profile => {
       if (profile.is_connected) {
-        if (!grouped[profile.toolkit_slug]) {
-          grouped[profile.toolkit_slug] = [];
+        const toolkitKey = canonicalizeToolkitSlug(profile.toolkit_slug);
+        if (!grouped[toolkitKey]) {
+          grouped[toolkitKey] = [];
         }
-        grouped[profile.toolkit_slug].push(profile);
+        grouped[toolkitKey].push(profile);
       }
     });
     return grouped;
@@ -704,7 +716,7 @@ export const ComposioRegistry: React.FC<ComposioRegistryProps> = ({
                           <AppCard
                             key={app.slug}
                             app={app}
-                            profiles={profilesByToolkit[app.slug] || []}
+                            profiles={profilesByToolkit[canonicalizeToolkitSlug(app.slug)] || []}
                             onConnect={() => handleConnect(app)}
                             onConfigure={(profile) => handleConfigure(app, profile)}
                             isConnectedToAgent={isAppConnectedToAgent(agent, app.slug, profiles || [])}

@@ -206,6 +206,69 @@ export interface BulkDeleteProfilesResponse {
   message: string;
 }
 
+const normalizeComposioProfile = (profile: ComposioProfile): ComposioProfile => {
+  const normalizedToolkitSlug = (profile.toolkit_slug || '').trim().toLowerCase();
+  const profileName = profile.profile_name || profile.display_name || 'Profile';
+  const displayName = profile.display_name || profile.profile_name || profileName;
+
+  return {
+    ...profile,
+    toolkit_slug: normalizedToolkitSlug || profile.toolkit_slug,
+    profile_name: profileName,
+    display_name: displayName,
+    is_connected: Boolean(profile.is_connected || profile.mcp_url || profile.connected_account_id),
+  };
+};
+
+const sortComposioProfiles = (profiles: ComposioProfile[]): ComposioProfile[] => {
+  return [...profiles].sort((a, b) => {
+    if (a.is_default !== b.is_default) {
+      return a.is_default ? -1 : 1;
+    }
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  });
+};
+
+const applyProfileFilters = (
+  profiles: ComposioProfile[],
+  params?: { toolkit_slug?: string; is_active?: boolean },
+): ComposioProfile[] => {
+  let filtered = profiles;
+
+  if (params?.toolkit_slug) {
+    const wantedToolkit = params.toolkit_slug.trim().toLowerCase();
+    filtered = filtered.filter((profile) => profile.toolkit_slug === wantedToolkit);
+  }
+
+  if (params?.is_active !== undefined) {
+    filtered = filtered.filter((profile) => profile.is_connected === params.is_active);
+  }
+
+  return filtered;
+};
+
+const toComposioProfilesFromCredentials = (
+  toolkits: ComposioToolkitGroup[],
+): ComposioProfile[] => {
+  const profiles = toolkits.flatMap((toolkit) =>
+    toolkit.profiles.map((profile) => ({
+      profile_id: profile.profile_id,
+      profile_name: profile.profile_name,
+      display_name: profile.display_name,
+      toolkit_slug: profile.toolkit_slug || toolkit.toolkit_slug,
+      toolkit_name: profile.toolkit_name || toolkit.toolkit_name,
+      mcp_url: '',
+      redirect_url: undefined,
+      connected_account_id: undefined,
+      is_connected: profile.is_connected || profile.has_mcp_url,
+      is_default: profile.is_default,
+      created_at: profile.created_at,
+    })),
+  );
+
+  return sortComposioProfiles(profiles.map(normalizeComposioProfile));
+};
+
 export const composioApi = {
   async getCategories(): Promise<CompositoCategoriesResponse> {
     const result = await backendApi.get<CompositoCategoriesResponse>(
@@ -268,19 +331,93 @@ export const composioApi = {
       queryParams.append('is_active', params.is_active.toString());
     }
     
-    const result = await backendApi.get<ComposioProfilesResponse>(
-      `/composio/profiles${queryParams.toString() ? `?${queryParams.toString()}` : ''}`,
-      {
-        errorContext: { operation: 'load profiles', resource: 'Composio profiles' },
-        timeout: COMPOSIO_REQUEST_TIMEOUT_MS,
+    try {
+      const result = await backendApi.get<ComposioProfilesResponse>(
+        `/composio/profiles${queryParams.toString() ? `?${queryParams.toString()}` : ''}`,
+        {
+          errorContext: { operation: 'load profiles', resource: 'Composio profiles' },
+          timeout: COMPOSIO_REQUEST_TIMEOUT_MS,
+        }
+      );
+
+      if (!result.success || !result.data) {
+        throw new Error(result.error?.message || 'Failed to get profiles');
       }
-    );
 
-    if (!result.success) {
-      throw new Error(result.error?.message || 'Failed to get profiles');
+      const primaryProfiles = sortComposioProfiles(
+        (result.data.profiles || []).map(normalizeComposioProfile),
+      );
+
+      // If the primary endpoint already reports connected profiles, trust it.
+      if (primaryProfiles.some((profile) => profile.is_connected)) {
+        return applyProfileFilters(primaryProfiles, params);
+      }
+
+      // Otherwise, attempt secure profile fallback and merge connectivity status.
+      const fallbackResponse = await backendApi.get<ComposioCredentialsResponse>(
+        '/secure-mcp/composio-profiles',
+        {
+          showErrors: false,
+          timeout: COMPOSIO_REQUEST_TIMEOUT_MS,
+        },
+      );
+
+      if (!fallbackResponse.success || !fallbackResponse.data) {
+        return applyProfileFilters(primaryProfiles, params);
+      }
+
+      const fallbackProfiles = toComposioProfilesFromCredentials(
+        fallbackResponse.data.toolkits || [],
+      );
+      const fallbackById = new Map(
+        fallbackProfiles.map((profile) => [profile.profile_id, profile]),
+      );
+
+      const mergedProfiles = primaryProfiles.map((profile) => {
+        const fallbackProfile = fallbackById.get(profile.profile_id);
+        if (!fallbackProfile) {
+          return profile;
+        }
+        return normalizeComposioProfile({
+          ...profile,
+          is_connected: profile.is_connected || fallbackProfile.is_connected,
+          mcp_url: profile.mcp_url || fallbackProfile.mcp_url,
+          connected_account_id:
+            profile.connected_account_id || fallbackProfile.connected_account_id,
+        });
+      });
+
+      const existingIds = new Set(mergedProfiles.map((profile) => profile.profile_id));
+      const fallbackOnlyProfiles = fallbackProfiles.filter(
+        (profile) => !existingIds.has(profile.profile_id),
+      );
+
+      return applyProfileFilters(
+        sortComposioProfiles([...mergedProfiles, ...fallbackOnlyProfiles]),
+        params,
+      );
+    } catch (primaryError) {
+      // Fallback path for transient /composio/profiles issues:
+      // use secure credential profiles so integration cards don't falsely show "Not connected".
+      const fallbackResponse = await backendApi.get<ComposioCredentialsResponse>(
+        '/secure-mcp/composio-profiles',
+        {
+          showErrors: false,
+          timeout: COMPOSIO_REQUEST_TIMEOUT_MS,
+        },
+      );
+
+      if (!fallbackResponse.success || !fallbackResponse.data) {
+        throw primaryError instanceof Error
+          ? primaryError
+          : new Error('Failed to get profiles');
+      }
+
+      const fallbackProfiles = toComposioProfilesFromCredentials(
+        fallbackResponse.data.toolkits || [],
+      );
+      return applyProfileFilters(fallbackProfiles, params);
     }
-
-    return result.data!.profiles;
   },
 
   async createProfile(request: CreateComposioProfileRequest): Promise<CreateComposioProfileResponse> {

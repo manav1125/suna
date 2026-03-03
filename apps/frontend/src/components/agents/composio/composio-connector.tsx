@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -424,6 +424,7 @@ export const ComposioConnector: React.FC<ComposioConnectorProps> = ({
 
   const [selectedTools, setSelectedTools] = useState<string[]>([]);
   const [isSavingTools, setIsSavingTools] = useState(false);
+  const authWindowRef = useRef<Window | null>(null);
 
   const { mutate: createProfile, isPending: isCreating } =
     useCreateComposioProfile();
@@ -446,6 +447,10 @@ export const ComposioConnector: React.FC<ComposioConnectorProps> = ({
   const existingProfiles =
     profiles?.filter((p) => p.toolkit_slug === app.slug && p.is_connected) ||
     [];
+  const preferredExistingProfile = useMemo(
+    () => existingProfiles.find((profile) => profile.is_default) || existingProfiles[0] || null,
+    [existingProfiles],
+  );
 
   const [toolsPreviewSearchTerm, setToolsPreviewSearchTerm] = useState('');
   const { data: toolsResponse, isLoading: isLoadingToolsPreview } =
@@ -475,6 +480,9 @@ export const ComposioConnector: React.FC<ComposioConnectorProps> = ({
       setUseCustomAuth(requiresCustomAuth);
       setCustomAuthConfig({});
       setCustomAuthConfigErrors({});
+    } else if (authWindowRef.current && !authWindowRef.current.closed) {
+      authWindowRef.current.close();
+      authWindowRef.current = null;
     }
   }, [open, app.name, app.slug, mode]);
 
@@ -653,6 +661,29 @@ export const ComposioConnector: React.FC<ComposioConnectorProps> = ({
       return;
     }
 
+    const authPopup = window.open(
+      '',
+      '_blank',
+      'width=600,height=700,resizable=yes,scrollbars=yes',
+    );
+    if (authPopup) {
+      authPopup.document.title = `Connect ${app.name}`;
+      authPopup.document.body.innerHTML = `
+        <div style="font-family: Inter, system-ui, -apple-system, sans-serif; display: flex; min-height: 100vh; align-items: center; justify-content: center; color: #111827; margin: 0; padding: 24px; text-align: center;">
+          <div>
+            <div style="font-size: 18px; font-weight: 600; margin-bottom: 8px;">Opening authentication...</div>
+            <div style="font-size: 14px; color: #6b7280;">Please wait while we connect your account.</div>
+          </div>
+        </div>
+      `;
+      authWindowRef.current = authPopup;
+    } else {
+      authWindowRef.current = null;
+      toast.warning(
+        'Your browser blocked the popup. Please allow popups for this site.',
+      );
+    }
+
     createProfile(
       {
         toolkit_slug: app.slug,
@@ -673,12 +704,28 @@ export const ComposioConnector: React.FC<ComposioConnectorProps> = ({
           if (response.redirect_url) {
             setRedirectUrl(response.redirect_url);
             navigateToStep(Step.Connecting);
-            window.open(
-              response.redirect_url,
-              '_blank',
-              'width=600,height=700',
-            );
+            if (authWindowRef.current && !authWindowRef.current.closed) {
+              authWindowRef.current.location.href = response.redirect_url;
+              authWindowRef.current.focus();
+            } else {
+              const fallbackPopup = window.open(
+                response.redirect_url,
+                '_blank',
+                'width=600,height=700,resizable=yes,scrollbars=yes',
+              );
+              if (!fallbackPopup) {
+                toast.error(
+                  'Authentication popup was blocked. Use "click here to authenticate" below.',
+                );
+              } else {
+                authWindowRef.current = fallbackPopup;
+              }
+            }
           } else {
+            if (authWindowRef.current && !authWindowRef.current.closed) {
+              authWindowRef.current.close();
+              authWindowRef.current = null;
+            }
             if (mode === 'full' && agentId) {
               setIsSavingTools(true);
               try {
@@ -699,6 +746,10 @@ export const ComposioConnector: React.FC<ComposioConnectorProps> = ({
           }
         },
         onError: (error: any) => {
+          if (authWindowRef.current && !authWindowRef.current.closed) {
+            authWindowRef.current.close();
+            authWindowRef.current = null;
+          }
           toast.error(error.message || 'Failed to create profile');
         },
       },
@@ -706,6 +757,10 @@ export const ComposioConnector: React.FC<ComposioConnectorProps> = ({
   };
 
   const handleAuthComplete = async () => {
+    if (authWindowRef.current && !authWindowRef.current.closed) {
+      authWindowRef.current.close();
+      authWindowRef.current = null;
+    }
     if (createdProfileId && mode === 'full' && agentId) {
       setIsSavingTools(true);
       try {
@@ -879,7 +934,7 @@ export const ComposioConnector: React.FC<ComposioConnectorProps> = ({
                                 } else {
                                   setSelectedConnectionType('existing');
                                   setSelectedProfileId(
-                                    existingProfiles[0]?.profile_id || '',
+                                    preferredExistingProfile?.profile_id || '',
                                   );
                                 }
                               }}

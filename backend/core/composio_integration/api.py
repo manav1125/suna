@@ -364,16 +364,25 @@ async def create_profile(
 
         created_profile = None
         for profile in profiles:
-            if profile.profile_name == request.profile_name:
+            if profile.profile_id == result.profile_id:
                 created_profile = profile
                 break
         
         if not created_profile:
             raise HTTPException(status_code=500, detail="Profile created but not found")
-        
-        logger.debug(f"Returning profile response with redirect_url: {created_profile.redirect_url}")
-        
-        return ProfileResponse.from_composio_profile(created_profile)
+
+        profile_response = ProfileResponse.from_composio_profile(created_profile)
+
+        # Always prefer the live redirect URL from the new integration result.
+        # This avoids stale/incorrect redirects when profile names are reused.
+        if result.connected_account and result.connected_account.redirect_url:
+            profile_response.redirect_url = result.connected_account.redirect_url
+            profile_response.connected_account_id = result.connected_account.id
+            profile_response.is_connected = True
+
+        logger.debug(f"Returning profile response with redirect_url: {profile_response.redirect_url}")
+
+        return profile_response
         
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

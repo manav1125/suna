@@ -38,6 +38,7 @@ function safeDecode(value: string): string {
 // - workspace paths: /workspace/presentations/name/slide_01.html
 // - URLs with path query: .../files/content?path=%2Fworkspace%2Fpresentations%2Fname%2Fslide_01.html
 // - direct preview URLs: https://.../presentations/name/slide_01.html
+// - exported PDF names: presentations_name_slide_01.pdf (maps back to HTML slide path)
 function extractPresentationSlidePath(input: string): string | null {
     if (!input) return null;
 
@@ -61,6 +62,18 @@ function extractPresentationSlidePath(input: string): string | null {
         const match = candidate.match(/(?:^|\/)(?:workspace\/)?presentations\/([^\/?#]+)\/(slide_\d+\.html)$/i);
         if (match) {
             return `/workspace/presentations/${match[1]}/${match[2]}`;
+        }
+
+        // Handle exported filenames like:
+        // - presentations_ventureversepresentation_slide_01.pdf
+        // - /workspace/downloads/presentations_ventureversepresentation_slide_01.pdf
+        const exportedPdfMatch = candidate.match(
+            /(?:^|\/)(?:workspace\/)?(?:downloads\/)?presentations_(.+?)_slide_(\d+)\.pdf$/i
+        );
+        if (exportedPdfMatch) {
+            const presentationName = exportedPdfMatch[1];
+            const slideNum = exportedPdfMatch[2].padStart(2, '0');
+            return `/workspace/presentations/${presentationName}/slide_${slideNum}.html`;
         }
     }
 

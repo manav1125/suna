@@ -407,6 +407,7 @@ WHEN USER ASKS ABOUT KB FILES:
         mcp_jit_info += "TWO-STEP WORKFLOW: (1) discover_mcp_tools → (2) execute_mcp_tool\n"
         mcp_jit_info += "- DISCOVERY: discover_mcp_tools with filter=\"TOOL1,TOOL2,TOOL3\"\n"
         mcp_jit_info += "- EXECUTION: execute_mcp_tool with tool_name and args parameters\n"
+        mcp_jit_info += "- IMPORTANT: Do NOT call initialize_tools for MCP tool names; initialize_tools is for native tools.\n"
         mcp_jit_info += "</workflow>\n\n"
         
         mcp_jit_info += "<available_services>\n"

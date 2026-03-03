@@ -62,7 +62,8 @@ class ToolGuideRegistry:
         lines = [
             "# 9. AVAILABLE TOOLS",
             "",
-            "**🔴 MANDATORY:** Before using any tool, use initialize_tools to activate and get usage instructions.",
+            "**🔴 MANDATORY (native tools):** Before using native tools, use initialize_tools to activate and get usage instructions.",
+            "**MCP exception:** For external integrations (Gmail/Slack/etc), use discover_mcp_tools + execute_mcp_tool instead of initialize_tools.",
             "",
             "**Batch load ALL tools you need upfront:**",
             "- Analyze user request → Identify all needed tools → Load in ONE call",

@@ -159,14 +159,9 @@ export const useCreateComposioProfile = () => {
     mutationFn: async (request: CreateComposioProfileRequest): Promise<CreateComposioProfileResponse> => {
       return await composioApi.createProfile(request);
     },
-    onSuccess: (data, variables) => {
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: composioKeys.profiles.all() });
       toast.success(`Connected to ${variables.profile_name}!`);
-      
-      // If there's a redirect URL, open it automatically
-      if (data.redirect_url) {
-        window.open(data.redirect_url, '_blank', 'width=600,height=700,resizable=yes,scrollbars=yes');
-      }
     },
     onError: (error) => {
       console.error('Failed to create Composio profile:', error);

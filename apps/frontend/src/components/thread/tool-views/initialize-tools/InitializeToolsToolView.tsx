@@ -9,6 +9,7 @@ import {
   Sparkles, 
   Settings, 
   CheckCircle,
+  AlertTriangle,
   LucideIcon
 } from 'lucide-react';
 import { ToolViewHeader } from '../shared/ToolViewHeader';
@@ -56,6 +57,21 @@ export function InitializeToolsToolView({
   isSuccess = true,
   isStreaming = false,
 }: ToolViewProps) {
+  const hasError = !isSuccess && !isStreaming;
+
+  const errorMessage = React.useMemo(() => {
+    if (!hasError || !toolResult) return '';
+    if (typeof toolResult === 'string') return toolResult;
+    const result = toolResult as any;
+    return (
+      result?.error ||
+      result?.detail ||
+      result?.message ||
+      result?.content?.error ||
+      ''
+    );
+  }, [hasError, toolResult]);
+
   // Extract the tool_names from arguments to determine which mode is being activated
   const toolNames = React.useMemo(() => {
     if (!toolCall?.arguments) return [];
@@ -98,7 +114,11 @@ export function InitializeToolsToolView({
   }, [toolNames]);
 
   const Icon = modeConfig.icon;
-  const title = isStreaming ? `Activating ${modeConfig.name}...` : `${modeConfig.name} Activated`;
+  const title = isStreaming
+    ? `Activating ${modeConfig.name}...`
+    : hasError
+      ? `${modeConfig.name} Activation Failed`
+      : `${modeConfig.name} Activated`;
 
   return (
     <Card className="gap-0 flex border-0 shadow-none p-0 py-0 rounded-none flex-col h-full overflow-hidden bg-card">
@@ -114,6 +134,8 @@ export function InitializeToolsToolView({
             <div className="absolute inset-0 rounded-full border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 flex items-center justify-center">
               {isStreaming ? (
                 <Sparkles className="h-5 w-5 text-zinc-400 dark:text-zinc-500" />
+              ) : hasError ? (
+                <AlertTriangle className="h-5 w-5 text-red-500" />
               ) : (
                 <CheckCircle className="h-5 w-5 text-zinc-900 dark:text-zinc-100" />
               )}
@@ -122,16 +144,30 @@ export function InitializeToolsToolView({
 
           {/* Title */}
           <h3 className="text-base font-medium mb-1 text-zinc-900 dark:text-zinc-100 tracking-tight">
-            {isStreaming ? `Activating ${modeConfig.name}...` : `${modeConfig.name} Ready`}
+            {isStreaming
+              ? `Activating ${modeConfig.name}...`
+              : hasError
+                ? `${modeConfig.name} Failed`
+                : `${modeConfig.name} Ready`}
           </h3>
           
           {/* Subtitle */}
           <p className="text-xs text-zinc-400 dark:text-zinc-500 text-center mb-4 font-mono">
             {isStreaming 
               ? 'Preparing...'
-              : `${toolNames.length} tool${toolNames.length !== 1 ? 's' : ''} activated`
+              : hasError
+                ? 'Activation failed'
+                : `${toolNames.length} tool${toolNames.length !== 1 ? 's' : ''} activated`
             }
           </p>
+
+          {hasError && errorMessage && (
+            <div className="w-full max-w-2xl mb-4 rounded-md border border-red-200/60 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/20 p-3">
+              <p className="text-xs font-mono text-red-700 dark:text-red-300 break-words">
+                {errorMessage}
+              </p>
+            </div>
+          )}
 
           {/* Tool badges - minimal monochrome style */}
           {toolNames.length > 0 && (
@@ -179,7 +215,9 @@ export function InitializeToolsToolView({
       >
         {!isStreaming && (
           <Badge variant="outline" className="h-5 py-0 px-2 bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800">
-            <span className="text-[10px] font-mono text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">Ready</span>
+            <span className="text-[10px] font-mono text-zinc-600 dark:text-zinc-400 uppercase tracking-wider">
+              {hasError ? 'Failed' : 'Ready'}
+            </span>
           </Badge>
         )}
       </ToolViewFooter>

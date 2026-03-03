@@ -384,8 +384,8 @@ async def init_db() -> None:
         connect_args["options"] = f"-c statement_timeout={STATEMENT_TIMEOUT} -c lock_timeout=5000"
     
     if USE_NULLPOOL == "auto":
-        # Keep local behavior conservative, but prefer pooled connections in staging/prod.
-        use_nullpool = (config.ENV_MODE == EnvMode.LOCAL and is_transaction_pooler)
+        # Transaction poolers (e.g., Supabase 6543) should not be wrapped in app-side pooling.
+        use_nullpool = is_transaction_pooler
     else:
         use_nullpool = USE_NULLPOOL == "true"
     execution_opts = {"prepared_statement_cache_size": 0}
@@ -435,7 +435,7 @@ async def init_db() -> None:
             connect_args_read["options"] = f"-c statement_timeout={STATEMENT_TIMEOUT} -c lock_timeout=5000"
         
         if USE_NULLPOOL == "auto":
-            use_nullpool_read = (config.ENV_MODE == EnvMode.LOCAL and is_transaction_pooler_read)
+            use_nullpool_read = is_transaction_pooler_read
         else:
             use_nullpool_read = USE_NULLPOOL == "true"
         

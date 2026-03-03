@@ -2,7 +2,7 @@ import json
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from cryptography.fernet import Fernet
 import os
@@ -53,6 +53,28 @@ class ComposioProfileService:
 
     def _generate_config_hash(self, config_json: str) -> str:
         return hashlib.sha256(config_json.encode()).hexdigest()
+
+    def _row_to_profile(self, row: Dict[str, Any]) -> ComposioProfile:
+        config = self._decrypt_config(row['encrypted_config'])
+        return ComposioProfile(
+            profile_id=row['profile_id'],
+            account_id=row['account_id'],
+            mcp_qualified_name=row['mcp_qualified_name'],
+            profile_name=row['profile_name'],
+            display_name=row['display_name'],
+            encrypted_config=row['encrypted_config'],
+            config_hash=row['config_hash'],
+            toolkit_slug=config.get('toolkit_slug', ''),
+            toolkit_name=config.get('toolkit_name', ''),
+            mcp_url=config.get('mcp_url', ''),
+            redirect_url=config.get('redirect_url'),
+            connected_account_id=config.get('connected_account_id'),
+            is_active=row.get('is_active', True),
+            is_default=row.get('is_default', False),
+            is_connected=bool(config.get('mcp_url')),
+            created_at=datetime.fromisoformat(row['created_at'].replace('Z', '+00:00')) if row.get('created_at') else None,
+            updated_at=datetime.fromisoformat(row['updated_at'].replace('Z', '+00:00')) if row.get('updated_at') else None,
+        )
 
     def _build_config(
         self,
@@ -165,7 +187,9 @@ class ComposioProfileService:
                 connected_account_id=connected_account_id,
                 is_active=True,
                 is_default=is_default,
-                is_connected=bool(redirect_url),
+                # A profile is usable when it has a runtime MCP URL.
+                # redirect_url is only used for interactive OAuth handoff and may be absent afterward.
+                is_connected=bool(mcp_url),
                 created_at=now,
                 updated_at=now
             )
@@ -267,6 +291,21 @@ class ComposioProfileService:
             logger.error(f"Failed to get config for profile {profile_id}: {e}", exc_info=True)
             raise
 
+    async def get_profile(self, profile_id: str, account_id: str) -> Optional[ComposioProfile]:
+        try:
+            client = await self.db.client
+            result = await client.table('user_mcp_credential_profiles').select('*').eq(
+                'profile_id', profile_id
+            ).eq('account_id', account_id).execute()
+
+            if not result.data:
+                return None
+
+            return self._row_to_profile(result.data[0])
+        except Exception as e:
+            logger.error(f"Failed to get Composio profile {profile_id}: {e}", exc_info=True)
+            raise
+
     async def get_profiles(self, account_id: str, toolkit_slug: Optional[str] = None) -> List[ComposioProfile]:
         try:
             client = await self.db.client
@@ -277,36 +316,118 @@ class ComposioProfileService:
                 query = query.eq('mcp_qualified_name', f"composio.{toolkit_slug}")
             else:
                 query = query.like('mcp_qualified_name', 'composio.%')
+
+            # Deterministic order: prefer default profiles, then newest activity.
+            query = query.order('is_default', desc=True).order('updated_at', desc=True).order('created_at', desc=True)
             
             result = await query.execute()
             
             profiles = []
             for row in result.data:
-                config = self._decrypt_config(row['encrypted_config'])
-                
-                profile = ComposioProfile(
-                    profile_id=row['profile_id'],
-                    account_id=row['account_id'],
-                    mcp_qualified_name=row['mcp_qualified_name'],
-                    profile_name=row['profile_name'],
-                    display_name=row['display_name'],
-                    encrypted_config=row['encrypted_config'],
-                    config_hash=row['config_hash'],
-                    toolkit_slug=config.get('toolkit_slug', ''),
-                    toolkit_name=config.get('toolkit_name', ''),
-                    mcp_url=config.get('mcp_url', ''),
-                    redirect_url=config.get('redirect_url'),
-                    connected_account_id=config.get('connected_account_id'),
-                    is_active=row.get('is_active', True),
-                    is_default=row.get('is_default', False),
-                    is_connected=bool(config.get('redirect_url')),
-                    created_at=datetime.fromisoformat(row['created_at'].replace('Z', '+00:00')) if row.get('created_at') else None,
-                    updated_at=datetime.fromisoformat(row['updated_at'].replace('Z', '+00:00')) if row.get('updated_at') else None
-                )
-                profiles.append(profile)
+                profiles.append(self._row_to_profile(row))
             
             return profiles
             
         except Exception as e:
             logger.error(f"Failed to get Composio profiles: {e}", exc_info=True)
             raise 
+
+    async def resolve_runtime_mcp_url(
+        self,
+        account_id: str,
+        toolkit_slug: str,
+        preferred_profile_id: Optional[str] = None
+    ) -> Tuple[str, str]:
+        """
+        Resolve a working runtime MCP URL for a toolkit.
+        Returns: (mcp_url, resolved_profile_id)
+        """
+        if preferred_profile_id:
+            try:
+                preferred_url = await self.get_mcp_url_for_runtime(preferred_profile_id, account_id=account_id)
+                return preferred_url, preferred_profile_id
+            except Exception as e:
+                logger.warning(
+                    f"Preferred Composio profile {preferred_profile_id} is not usable for {toolkit_slug}: {e}"
+                )
+
+        profiles = await self.get_profiles(account_id, toolkit_slug=toolkit_slug)
+        if not profiles:
+            raise ValueError(f"No Composio profiles found for toolkit '{toolkit_slug}'")
+
+        connected_profiles = [p for p in profiles if p.is_active and p.mcp_url]
+        if not connected_profiles:
+            raise ValueError(
+                f"No connected Composio profiles with MCP URL for toolkit '{toolkit_slug}'. "
+                "Reconnect the integration and try again."
+            )
+
+        for profile in connected_profiles:
+            try:
+                mcp_url = await self.get_mcp_url_for_runtime(profile.profile_id, account_id=account_id)
+                logger.info(
+                    f"Resolved fallback Composio profile {profile.profile_id} for toolkit {toolkit_slug}"
+                )
+                return mcp_url, profile.profile_id
+            except Exception as e:
+                logger.warning(
+                    f"Skipping unusable Composio profile {profile.profile_id} for {toolkit_slug}: {e}"
+                )
+
+        raise ValueError(
+            f"Unable to resolve a usable Composio profile for toolkit '{toolkit_slug}' after trying "
+            f"{len(connected_profiles)} connected profile(s)."
+        )
+
+    async def get_runtime_profile_candidates(
+        self,
+        account_id: str,
+        toolkit_slug: str,
+        preferred_profile_id: Optional[str] = None,
+    ) -> List[Tuple[str, str]]:
+        """
+        Return ordered runtime candidates for a Composio toolkit as:
+        [(profile_id, mcp_url), ...]
+        Order: preferred profile first (if usable), then remaining connected profiles.
+        """
+        profiles = await self.get_profiles(account_id, toolkit_slug=toolkit_slug)
+        if not profiles:
+            raise ValueError(f"No Composio profiles found for toolkit '{toolkit_slug}'")
+
+        connected_profiles = [p for p in profiles if p.is_active and p.mcp_url]
+        if not connected_profiles:
+            raise ValueError(
+                f"No connected Composio profiles with MCP URL for toolkit '{toolkit_slug}'. "
+                "Reconnect the integration and try again."
+            )
+
+        ordered_profiles: List[ComposioProfile] = []
+        if preferred_profile_id:
+            preferred = next((p for p in connected_profiles if p.profile_id == preferred_profile_id), None)
+            if preferred:
+                ordered_profiles.append(preferred)
+
+        for profile in connected_profiles:
+            if not any(existing.profile_id == profile.profile_id for existing in ordered_profiles):
+                ordered_profiles.append(profile)
+
+        candidates: List[Tuple[str, str]] = []
+        errors: List[str] = []
+
+        for profile in ordered_profiles:
+            try:
+                mcp_url = await self.get_mcp_url_for_runtime(profile.profile_id, account_id=account_id)
+                candidates.append((profile.profile_id, mcp_url))
+            except Exception as e:
+                errors.append(f"{profile.profile_id}: {e}")
+                logger.warning(
+                    f"Skipping unusable Composio profile {profile.profile_id} for {toolkit_slug}: {e}"
+                )
+
+        if candidates:
+            return candidates
+
+        raise ValueError(
+            f"Unable to resolve a usable Composio profile for toolkit '{toolkit_slug}' after trying "
+            f"{len(ordered_profiles)} connected profile(s). Errors: {' | '.join(errors)}"
+        )

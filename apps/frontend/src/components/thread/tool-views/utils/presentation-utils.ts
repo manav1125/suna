@@ -264,6 +264,20 @@ export function parsePresentationSlidePath(filePath: string | null): {
       slideNumber: parseInt(match[2], 10)
     };
   }
+
+  // Match exported PDF filenames from export_to_pdf:
+  // - presentations_mydeck_slide_01.pdf
+  // - /workspace/downloads/presentations_mydeck_slide_01.pdf
+  const exportedPdfMatch = filePath.match(
+    /(?:^|\/)(?:workspace\/)?(?:downloads\/)?presentations_(.+?)_slide_(\d+)\.pdf$/i
+  );
+  if (exportedPdfMatch) {
+    return {
+      isValid: true,
+      presentationName: exportedPdfMatch[1],
+      slideNumber: parseInt(exportedPdfMatch[2], 10),
+    };
+  }
   
   return { isValid: false, presentationName: null, slideNumber: null };
 }

@@ -324,29 +324,40 @@ class MCPRegistry:
                         logger.warning(f"⚠️  [MCP REGISTRY] No account_id available for {toolkit_slug}")
                         continue
                     
-                    profiles = await profile_service.get_profiles(account_id, toolkit_slug=toolkit_slug)
-                    
-                    if not profiles or len(profiles) == 0:
-                        logger.warning(f"⚠️  [MCP REGISTRY] No profile found for {toolkit_slug}")
-                        continue
-                    
-                    profile = profiles[0]
-                    profile_config = await profile_service.get_profile_config(profile.profile_id, account_id=account_id)
-                    mcp_url = profile_config.get('mcp_url')
-                    
-                    if not mcp_url:
-                        logger.warning(f"⚠️  [MCP REGISTRY] No MCP URL for {toolkit_slug}")
-                        continue
-                    
-                    from core.mcp_module.mcp_service import mcp_service
-                    result = await mcp_service.discover_custom_tools(
-                        request_type="http",
-                        config={"url": mcp_url}
+                    candidates = await profile_service.get_runtime_profile_candidates(
+                        account_id=account_id,
+                        toolkit_slug=toolkit_slug,
                     )
-                    
-                    if not result.success:
-                        logger.warning(f"⚠️  [MCP REGISTRY] Failed to discover tools from {toolkit_slug}: {result.message}")
+
+                    from core.mcp_module.mcp_service import mcp_service
+                    result = None
+                    candidate_errors: List[str] = []
+                    selected_profile_id: Optional[str] = None
+
+                    for profile_id, mcp_url in candidates:
+                        try:
+                            result = await mcp_service.discover_custom_tools(
+                                request_type="http",
+                                config={"url": mcp_url}
+                            )
+                            if result.success:
+                                selected_profile_id = profile_id
+                                break
+                            candidate_errors.append(f"profile_id={profile_id}: {result.message}")
+                        except Exception as candidate_error:
+                            candidate_errors.append(f"profile_id={profile_id}: {candidate_error}")
+
+                    if not result or not result.success:
+                        logger.warning(
+                            f"⚠️  [MCP REGISTRY] Failed to discover tools from {toolkit_slug} "
+                            f"after trying {len(candidates)} profile(s): {' | '.join(candidate_errors)}"
+                        )
                         continue
+
+                    if selected_profile_id:
+                        logger.info(
+                            f"⚡ [MCP REGISTRY] Discovered tools for {toolkit_slug} using profile {selected_profile_id}"
+                        )
                     
                     toolkit_schemas = {}
                     for discovered_tool in result.tools:
@@ -575,6 +586,14 @@ class MCPRegistry:
                 logger.info(f"🔄 [MCP EXECUTION] Auto-activating {tool_name}")
                 success = await self._auto_activate_tool(tool_name, context)
                 if not success:
+                    activation_error = None
+                    current_tool_info = self._tools.get(tool_name)
+                    if current_tool_info:
+                        activation_error = current_tool_info.last_error
+                    if activation_error:
+                        return self._fail_response(
+                            f"Failed to activate MCP tool: {tool_name}. {activation_error}"
+                        )
                     return self._fail_response(f"Failed to activate MCP tool: {tool_name}")
             
             # Execute tool
@@ -608,10 +627,10 @@ class MCPRegistry:
             return self._fail_response(f"MCP tool execution error: {str(e)}")
     
     async def _auto_activate_tool(self, tool_name: str, context: MCPExecutionContext) -> bool:
+        tool_info = self._tools.get(tool_name)
         try:
             self._update_tool_status(tool_name, MCPToolStatus.LOADING)
             
-            tool_info = self._tools.get(tool_name)
             cached_schema = tool_info.schema if tool_info else None
             
             if cached_schema:
@@ -631,8 +650,20 @@ class MCPRegistry:
                     logger.debug(f"⚡ [MCP ACTIVATION] Pre-populated JIT loader cache for {tool_name}")
             
             from core.jit import JITLoader
+            from core.jit.result_types import ActivationError
             result = await JITLoader.activate_mcp_tool(tool_name, context.thread_manager)
-            
+
+            if isinstance(result, ActivationError):
+                error_message = result.message
+                if result.details:
+                    error_message = f"{error_message} | details: {result.details}"
+                if tool_info:
+                    tool_info.last_error = error_message
+                    tool_info.error_count += 1
+                self._update_tool_status(tool_name, MCPToolStatus.FAILED)
+                logger.error(f"❌ [MCP ACTIVATION] Failed to activate {tool_name}: {error_message}")
+                return False
+
             if hasattr(result, 'tool_name') and result.tool_name == tool_name:
                 main_registry = context.thread_manager.tool_registry
                 if tool_name in main_registry.tools:
@@ -645,11 +676,18 @@ class MCPRegistry:
                     main_registry.invalidate_function_cache()
                     
                     return self.activate_tool(tool_name, instance, schema)
-            
+
+            if tool_info:
+                tool_info.last_error = "Tool activation returned no registered tool instance"
+                tool_info.error_count += 1
+            self._update_tool_status(tool_name, MCPToolStatus.FAILED)
             return False
             
         except Exception as e:
             logger.error(f"❌ [MCP ACTIVATION] Failed to activate {tool_name}: {e}")
+            if tool_info:
+                tool_info.last_error = str(e)
+                tool_info.error_count += 1
             self._update_tool_status(tool_name, MCPToolStatus.FAILED)
             return False
     

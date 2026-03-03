@@ -44,23 +44,60 @@ class MCPToolExecutor:
         from core.agentpress.tool import ToolResult
 
         custom_config = self.tool_info['custom_config']
-        profile_id = custom_config.get('profile_id')
+        preferred_profile_id = custom_config.get('profile_id')
+        if not self.account_id:
+            raise ValueError(f"Missing account_id for Composio tool '{tool_name}' execution")
 
-        if not profile_id:
-            raise ValueError("Missing profile_id for Composio tool")
+        toolkit_slug = custom_config.get('toolkit_slug') or self.mcp_config.get('toolkit_slug')
+        if not toolkit_slug:
+            mcp_qualified_name = self.mcp_config.get('mcp_qualified_name', '')
+            if isinstance(mcp_qualified_name, str) and mcp_qualified_name.startswith('composio.'):
+                toolkit_slug = mcp_qualified_name.split('.', 1)[1]
+        if not toolkit_slug and '_' in tool_name:
+            toolkit_slug = tool_name.split('_', 1)[0].lower()
+        if not toolkit_slug:
+            raise ValueError(f"Unable to determine toolkit_slug for Composio tool '{tool_name}'")
 
         try:
             db = DBConnection()
             profile_service = ComposioProfileService(db)
-            mcp_url = await profile_service.get_mcp_url_for_runtime(profile_id, account_id=self.account_id)
+            candidates = await profile_service.get_runtime_profile_candidates(
+                account_id=self.account_id,
+                toolkit_slug=toolkit_slug,
+                preferred_profile_id=preferred_profile_id
+            )
+            candidate_errors = []
+            for resolved_profile_id, mcp_url in candidates:
+                try:
+                    logger.debug(
+                        f"⚡ [MCP EXEC] Trying Composio profile {resolved_profile_id} for {tool_name}"
+                    )
+                    async with streamablehttp_client(mcp_url) as (read, write, _):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            result = await session.call_tool(tool_name, arguments=args)
+                            content = self._extract_result_content(result)
 
-            async with streamablehttp_client(mcp_url) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool(tool_name, arguments=args)
-                    content = self._extract_result_content(result)
-                    
-                    return ToolResult(success=True, output=str(content))
+                            if resolved_profile_id != preferred_profile_id:
+                                logger.info(
+                                    f"⚡ [MCP EXEC] Fallback Composio profile resolved for {tool_name}: "
+                                    f"{preferred_profile_id} -> {resolved_profile_id}"
+                                )
+                                custom_config['profile_id'] = resolved_profile_id
+
+                            return ToolResult(success=True, output=str(content))
+                except Exception as candidate_error:
+                    candidate_errors.append(
+                        f"profile_id={resolved_profile_id}: {candidate_error}"
+                    )
+                    logger.warning(
+                        f"⚠️ [MCP EXEC] Composio execution failed for {tool_name} with profile {resolved_profile_id}: {candidate_error}"
+                    )
+
+            raise ValueError(
+                f"Failed to execute Composio tool '{tool_name}' after trying {len(candidates)} profile(s). "
+                f"Errors: {' | '.join(candidate_errors)}"
+            )
             
         except Exception as e:
             logger.error(f"❌ [MCP EXEC] Composio execution failed for {tool_name}: {e}")

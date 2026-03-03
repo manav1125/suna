@@ -139,6 +139,72 @@ class SandboxFilesTool(SandboxToolsBase):
         except Exception as e:
             logger.warning(f"Failed to touch presentation metadata for '{file_path}': {str(e)}")
 
+    def _is_presentation_slide_file(self, file_path: str) -> bool:
+        cleaned = self.clean_path(file_path)
+        return bool(self._presentation_slide_pattern.match(cleaned))
+
+    def _validate_presentation_slide_html(self, file_contents: str) -> Optional[str]:
+        """
+        Guardrails for template-slide rewrites:
+        - Must remain a full HTML document
+        - Must not be effectively empty
+        - Must not keep common template placeholders
+        """
+        lowered = (file_contents or "").lower()
+        if "<html" not in lowered or "<body" not in lowered:
+            return (
+                "Presentation slide rewrite rejected: slide files must remain full HTML documents "
+                "(include <html> and <body> tags)."
+            )
+
+        body_match = re.search(r"<body[^>]*>([\s\S]*)</body>", file_contents, flags=re.IGNORECASE)
+        body_html = body_match.group(1) if body_match else file_contents
+
+        body_without_style_script = re.sub(r"<style[\s\S]*?</style>", " ", body_html, flags=re.IGNORECASE)
+        body_without_style_script = re.sub(r"<script[\s\S]*?</script>", " ", body_without_style_script, flags=re.IGNORECASE)
+        visible_text = re.sub(r"<[^>]+>", " ", body_without_style_script)
+        visible_text = re.sub(r"\s+", " ", visible_text).strip()
+
+        has_visual_elements = any(
+            marker in lowered for marker in ("<img", "<svg", "<canvas", "<video", "<iframe", "<table")
+        )
+        structural_nodes = len(
+            re.findall(r"<(div|section|article|main|header|footer|img|svg|table|ul|ol|li|h1|h2|h3|p)\b", body_html, flags=re.IGNORECASE)
+        )
+
+        if len(visible_text) < 20 and not has_visual_elements:
+            return (
+                "Presentation slide rewrite rejected: generated slide is effectively empty. "
+                "Keep the template structure and include real content."
+            )
+
+        if structural_nodes < 2 and len(visible_text) < 40 and not has_visual_elements:
+            return (
+                "Presentation slide rewrite rejected: slide lacks usable structure/content. "
+                "Preserve the template layout and replace placeholders with real data."
+            )
+
+        placeholder_hits = []
+        placeholder_markers = [
+            "lorem ipsum",
+            "yourwebsite.org",
+            "welcome to brightpath",
+            "brightpath",
+            "insert your",
+            "placeholder",
+        ]
+        for marker in placeholder_markers:
+            if marker in lowered:
+                placeholder_hits.append(marker)
+
+        if "brightpath" in placeholder_hits or "lorem ipsum" in placeholder_hits:
+            return (
+                "Presentation slide rewrite rejected: template placeholder text still present "
+                f"({', '.join(sorted(set(placeholder_hits)))}). Replace with requested content."
+            )
+
+        return None
+
     async def get_workspace_state(self) -> dict:
         """Get the current workspace state by reading all files"""
         files_state = {}
@@ -367,6 +433,11 @@ Usage:
             if not await self._file_exists(full_path):
                 return self.fail_response(f"File '{file_path}' does not exist. Use create_file to create a new file.")
 
+            if self._is_presentation_slide_file(file_path):
+                validation_error = self._validate_presentation_slide_html(file_contents)
+                if validation_error:
+                    return self.fail_response(validation_error)
+
             await self.sandbox.fs.upload_file(file_contents.encode(), full_path)
             await self.sandbox.fs.set_file_permissions(full_path, permissions)
             await self._touch_presentation_metadata_if_slide(file_path)
@@ -519,7 +590,7 @@ Usage:
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Use this tool to make an edit to an existing file.\n\nThis will be read by a less intelligent model, which will quickly apply the edit. You should make it clear what the edit is, while also minimizing the unchanged code you write.\nWhen writing the edit, you should specify each edit in sequence, with the special comment // ... existing code ... to represent unchanged code in between edited lines.\n\nFor example:\n\n// ... existing code ...\nFIRST_EDIT\n// ... existing code ...\nSECOND_EDIT\n// ... existing code ...\nTHIRD_EDIT\n// ... existing code ...\n\nYou should still bias towards repeating as few lines of the original file as possible to convey the change.\nBut, each edit should contain sufficient context of unchanged lines around the code you're editing to resolve ambiguity.\nDO NOT omit spans of pre-existing code (or comments) without using the // ... existing code ... comment to indicate its absence. If you omit the existing code comment, the model may inadvertently delete these lines.\nIf you plan on deleting a section, you must provide context before and after to delete it. If the initial code is ```code \\n Block 1 \\n Block 2 \\n Block 3 \\n code```, and you want to remove Block 2, you would output ```// ... existing code ... \\n Block 1 \\n  Block 3 \\n // ... existing code ...```.\nMake sure it is clear what the edit should be, and where it should be applied.\nALWAYS make all edits to a file in a single edit_file instead of multiple edit_file calls to the same file. The apply model can handle many distinct edits at once. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `target_file` (REQUIRED), `instructions` (REQUIRED), `code_edit` (REQUIRED).",
+            "description": "Use this tool to make an edit to an existing file.\n\n🚫 Do NOT use this tool for presentation slide files like `presentations/<name>/slide_XX.html`. For those files, use `full_file_rewrite` and preserve template structure/styles.\n\nThis will be read by a less intelligent model, which will quickly apply the edit. You should make it clear what the edit is, while also minimizing the unchanged code you write.\nWhen writing the edit, you should specify each edit in sequence, with the special comment // ... existing code ... to represent unchanged code in between edited lines.\n\nFor example:\n\n// ... existing code ...\nFIRST_EDIT\n// ... existing code ...\nSECOND_EDIT\n// ... existing code ...\nTHIRD_EDIT\n// ... existing code ...\n\nYou should still bias towards repeating as few lines of the original file as possible to convey the change.\nBut, each edit should contain sufficient context of unchanged lines around the code you're editing to resolve ambiguity.\nDO NOT omit spans of pre-existing code (or comments) without using the // ... existing code ... comment to indicate its absence. If you omit the existing code comment, the model may inadvertently delete these lines.\nIf you plan on deleting a section, you must provide context before and after to delete it. If the initial code is ```code \\n Block 1 \\n Block 2 \\n Block 3 \\n code```, and you want to remove Block 2, you would output ```// ... existing code ... \\n Block 1 \\n  Block 3 \\n // ... existing code ...```.\nMake sure it is clear what the edit should be, and where it should be applied.\nALWAYS make all edits to a file in a single edit_file instead of multiple edit_file calls to the same file. The apply model can handle many distinct edits at once. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `target_file` (REQUIRED), `instructions` (REQUIRED), `code_edit` (REQUIRED).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -549,6 +620,18 @@ Usage:
             full_path = self._get_full_path(target_file)
             if not await self._file_exists(full_path):
                 return self.fail_response(f"File '{target_file}' does not exist")
+
+            if self._is_presentation_slide_file(target_file):
+                return ToolResult(success=False, output=json.dumps({
+                    "message": (
+                        "edit_file is not supported for presentation slide files. "
+                        "Use full_file_rewrite on this slide instead, preserving the "
+                        "existing template HTML/CSS structure and replacing only content."
+                    ),
+                    "file_path": target_file,
+                    "original_content": None,
+                    "updated_content": None
+                }))
             
             original_content = (await self.sandbox.fs.download_file(full_path)).decode()
             

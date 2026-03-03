@@ -1,6 +1,6 @@
 from core.agentpress.tool import Tool, ToolResult, openapi_schema, tool_metadata
 from core.agentpress.thread_manager import ThreadManager
-from typing import List
+from typing import List, Dict, Any
 import json
 
 @tool_metadata(
@@ -189,50 +189,147 @@ class ExpandMessageTool(Tool):
         logger.info(f"🔧 [INIT TOOLS] Initializing tools: {tool_names}")
         
         registry = get_tool_guide_registry()
-        not_found = []
-        
-        valid_tool_names = []
+
+        # Split requested tools into native JIT tools (registry-backed) and MCP tools.
+        # LLMs sometimes pass MCP names (e.g., GMAIL_FETCH_EMAILS) to initialize_tools;
+        # we support that path to avoid hard failures and dead-end retries.
+        valid_tool_names: List[str] = []
+        mcp_tool_names: List[str] = []
+
+        mcp_loader = getattr(self.thread_manager, 'mcp_loader', None)
+        mcp_available_tools = list(getattr(mcp_loader, 'tool_map', {}).keys()) if mcp_loader else []
+
+        def _dedupe_keep_order(items: List[str]) -> List[str]:
+            seen = set()
+            out = []
+            for item in items:
+                if item not in seen:
+                    seen.add(item)
+                    out.append(item)
+            return out
+
+        def _find_native_match(name: str) -> str | None:
+            if registry.has_tool(name):
+                return name
+            normalized = name.lower().replace('-', '_')
+            for candidate in registry.get_all_tool_names():
+                if candidate.lower() == normalized:
+                    return candidate
+            return None
+
+        def _find_mcp_match(name: str) -> str:
+            if not mcp_available_tools:
+                return name
+            if name in mcp_available_tools:
+                return name
+
+            variants = [
+                name.strip(),
+                name.strip().upper(),
+                name.strip().replace(' ', '_'),
+                name.strip().replace(' ', '_').upper(),
+                name.strip().replace('-', '_'),
+                name.strip().replace('-', '_').upper(),
+            ]
+            for variant in variants:
+                if variant in mcp_available_tools:
+                    return variant
+
+            # Last-chance fuzzy match (ignore separators/case)
+            def canon(v: str) -> str:
+                return ''.join(ch for ch in v.lower() if ch.isalnum())
+
+            wanted = canon(name)
+            for candidate in mcp_available_tools:
+                if canon(candidate) == wanted:
+                    return candidate
+
+            return name
+
         for tool_name in tool_names:
-            if not registry.has_tool(tool_name):
-                not_found.append(tool_name)
-            else:
-                valid_tool_names.append(tool_name)
-        
-        if not_found:
-            available = ", ".join(registry.get_all_tool_names())
-            logger.error(f"❌ [INIT TOOLS] Tools not found: {not_found}")
-            return self.fail_response(
-                f"Tools not found: {', '.join(not_found)}. Available tools: {available}"
-            )
+            native_match = _find_native_match(tool_name)
+            if native_match:
+                valid_tool_names.append(native_match)
+                continue
+            mcp_tool_names.append(_find_mcp_match(tool_name))
+
+        valid_tool_names = _dedupe_keep_order(valid_tool_names)
+        mcp_tool_names = _dedupe_keep_order(mcp_tool_names)
         
         project_id = getattr(self.thread_manager, 'project_id', None)
         jit_config = getattr(self.thread_manager, 'jit_config', None)
         
-        logger.info(f"⚡ [INIT TOOLS] Parallel activation of {len(valid_tool_names)} tools")
+        logger.info(
+            f"⚡ [INIT TOOLS] Parallel activation of {len(valid_tool_names)} native + {len(mcp_tool_names)} MCP tools"
+        )
         activation_start = time.time()
-        
-        activation_tasks = [
-            JITLoader.activate_tool(tool_name, self.thread_manager, project_id, jit_config=jit_config)
-            for tool_name in valid_tool_names
-        ]
-        
+
+        activation_plan: List[tuple[str, str]] = []
+        activation_tasks = []
+
+        for tool_name in valid_tool_names:
+            activation_plan.append((tool_name, "native"))
+            activation_tasks.append(
+                JITLoader.activate_tool(tool_name, self.thread_manager, project_id, jit_config=jit_config)
+            )
+
+        for tool_name in mcp_tool_names:
+            activation_plan.append((tool_name, "mcp"))
+            activation_tasks.append(
+                JITLoader.activate_mcp_tool(tool_name, self.thread_manager, project_id, jit_config=jit_config)
+            )
+
         activation_results = await asyncio.gather(*activation_tasks, return_exceptions=True)
         logger.info(f"⏱️ [INIT TOOLS] Parallel activation completed in {(time.time() - activation_start) * 1000:.1f}ms")
         
         from core.jit.result_types import ActivationSuccess, ActivationError
         
-        guides = []
         activation_failures = []
+        activation_failure_details: List[Dict[str, Any]] = []
+        activated_tool_names = []
+
+        def _serialize_error_details(details: Any) -> str:
+            if details is None:
+                return ""
+            try:
+                return json.dumps(details, sort_keys=True, default=str)
+            except Exception:
+                return str(details)
         
-        for tool_name, result in zip(valid_tool_names, activation_results):
+        for (tool_name, activation_type), result in zip(activation_plan, activation_results):
+            prefix = "INIT TOOLS MCP" if activation_type == "mcp" else "INIT TOOLS"
             if isinstance(result, Exception):
                 activation_failures.append(tool_name)
-                logger.warning(f"⚠️  [INIT TOOLS] Failed to activate '{tool_name}': {result}")
+                error_message = str(result)
+                activation_failure_details.append({
+                    "tool_name": tool_name,
+                    "activation_type": activation_type,
+                    "error_type": "exception",
+                    "error": error_message
+                })
+                logger.warning(f"⚠️  [{prefix}] Failed to activate '{tool_name}': {error_message}")
             elif isinstance(result, ActivationError):
                 activation_failures.append(tool_name)
-                logger.warning(f"⚠️  [INIT TOOLS] {result.to_user_message()}")
+                user_message = result.to_user_message()
+                raw_message = result.message.strip() if isinstance(result.message, str) else str(result.message)
+                details_payload = _serialize_error_details(result.details)
+
+                exact_error = user_message
+                if raw_message and raw_message not in user_message:
+                    exact_error = f"{exact_error} | raw_error: {raw_message}"
+                if details_payload:
+                    exact_error = f"{exact_error} | details: {details_payload}"
+
+                activation_failure_details.append({
+                    "tool_name": tool_name,
+                    "activation_type": activation_type,
+                    "error_type": getattr(result.error_type, "value", str(result.error_type)),
+                    "error": exact_error
+                })
+                logger.warning(f"⚠️  [{prefix}] {exact_error}")
             elif isinstance(result, ActivationSuccess):
-                logger.debug(f"✅ [INIT TOOLS] {result}")
+                activated_tool_names.append(tool_name)
+                logger.debug(f"✅ [{prefix}] {result}")
         
         from core.jit.tool_cache import get_tool_cache
         
@@ -263,11 +360,34 @@ class ExpandMessageTool(Tool):
         if guides_to_cache:
             await tool_cache.set_multiple(guides_to_cache)
             logger.info(f"💾 [CACHE STORE] Cached {len(guides_to_cache)} new guides")
+
+        # Add minimal pseudo-guides for activated MCP tools so the model
+        # gets explicit execution instructions in this turn.
+        activated_mcp_tools = [t for t in mcp_tool_names if t in activated_tool_names]
+        for mcp_tool_name in activated_mcp_tools:
+            guides.append(
+                f"## {mcp_tool_name}\n\n"
+                f"External MCP tool '{mcp_tool_name}' is activated.\n"
+                f"Use execute_mcp_tool(tool_name=\"{mcp_tool_name}\", args={{...}}) with parameters from the discovered schema."
+            )
         
         if activation_failures:
             logger.error(f"❌ [INIT TOOLS] Failed to activate some tools: {activation_failures}")
         
-        successfully_activated = [t for t in valid_tool_names if t not in activation_failures]
+        successfully_activated = [t for t in activated_tool_names if t not in activation_failures]
+        if not successfully_activated:
+            native_available = ", ".join(registry.get_all_tool_names())
+            exact_errors = " | ".join(
+                f"{entry['tool_name']} ({entry['activation_type']}): {entry['error']}"
+                for entry in activation_failure_details
+            ) or "No activation error details captured."
+            return self.fail_response(
+                "Failed to activate requested tools. "
+                f"Requested: {', '.join(map(str, tool_names))}. "
+                f"Exact activation errors: {exact_errors}. "
+                f"Native tools available: {native_available}"
+            )
+
         if successfully_activated:
             await self._save_dynamic_tools_to_metadata(successfully_activated)
         
@@ -276,11 +396,27 @@ class ExpandMessageTool(Tool):
         logger.info(f"✅ [INIT TOOLS] Returned {len(guides)} guide(s) in {total_time:.1f}ms, total size: {total_guide_size:,} chars")
         logger.info(f"🎯 [INIT TOOLS] Tools now available for use: {[t for t in valid_tool_names if t not in activation_failures]}")
         
+        activation_warning_message = ""
+        if activation_failure_details:
+            failed_summary = ", ".join(sorted(set(activation_failures)))
+            exact_errors = " | ".join(
+                f"{entry['tool_name']} ({entry['activation_type']}): {entry['error']}"
+                for entry in activation_failure_details
+            )
+            activation_warning_message = (
+                f" Some tools failed activation ({failed_summary}). "
+                f"Exact activation errors: {exact_errors}"
+            )
+
         result = self.success_response({
             "status": "success",
-            "message": f"Loaded {len(guides)} tool guide(s). Tools are now available for use.",
+            "message": (
+                f"Loaded {len(guides)} tool guide(s). Tools are now available for use."
+                f"{activation_warning_message}"
+            ),
             "guides": "\n\n---\n\n".join(guides),
-            "activated_tools": [t for t in tool_names if t not in activation_failures],
+            "activated_tools": successfully_activated,
+            "activation_failures": activation_failure_details,
             "_internal": True
         })
         

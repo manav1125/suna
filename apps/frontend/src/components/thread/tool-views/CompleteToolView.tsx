@@ -31,6 +31,58 @@ interface CompleteToolViewProps extends ToolViewProps {
   onFileClick?: (filePath: string) => void;
 }
 
+function normalizePresentationAttachmentPath(path: string): string {
+  if (!path) return path;
+
+  const normalized = path.trim();
+
+  const htmlMatch = normalized.match(/(?:^|\/)(?:workspace\/)?presentations\/([^\/?#]+)\/slide_(\d+)\.html$/i);
+  if (htmlMatch) {
+    return `/workspace/presentations/${htmlMatch[1]}/slide_${htmlMatch[2].padStart(2, '0')}.html`;
+  }
+
+  const exportedPdfMatch = normalized.match(
+    /(?:^|\/)(?:workspace\/)?(?:downloads\/)?presentations_(.+?)_slide_(\d+)\.pdf$/i
+  );
+  if (exportedPdfMatch) {
+    return `/workspace/presentations/${exportedPdfMatch[1]}/slide_${exportedPdfMatch[2].padStart(2, '0')}.html`;
+  }
+
+  return normalized;
+}
+
+function normalizeCompleteAttachments(rawAttachments: string[]): string[] {
+  const normalized = rawAttachments.map(normalizePresentationAttachmentPath).filter(Boolean);
+
+  const presentationSlideRegex = /^\/workspace\/presentations\/([^/]+)\/slide_(\d+)\.html$/i;
+  const firstSlideByPresentation = new Map<string, { path: string; slide: number }>();
+  const nonPresentation: string[] = [];
+
+  for (const attachment of normalized) {
+    const match = attachment.match(presentationSlideRegex);
+    if (!match) {
+      nonPresentation.push(attachment);
+      continue;
+    }
+
+    const key = match[1].toLowerCase();
+    const slideNum = parseInt(match[2], 10);
+    const existing = firstSlideByPresentation.get(key);
+    if (!existing || slideNum < existing.slide) {
+      firstSlideByPresentation.set(key, { path: attachment, slide: slideNum });
+    }
+  }
+
+  const dedupe = (items: string[]) => Array.from(new Set(items));
+  const selectedPresentationSlides = Array.from(firstSlideByPresentation.values()).map((item) => item.path);
+
+  if (selectedPresentationSlides.length > 0) {
+    return dedupe([...selectedPresentationSlides, ...nonPresentation]);
+  }
+
+  return dedupe(normalized);
+}
+
 export function CompleteToolView({
   toolCall,
   toolResult,
@@ -73,12 +125,15 @@ export function CompleteToolView({
 
   // Extract data directly from structured props
   const text = toolCall.arguments?.text || null;
-  const attachments = toolCall.arguments?.attachments 
+  const attachmentsRaw = toolCall.arguments?.attachments 
     ? (Array.isArray(toolCall.arguments.attachments) 
         ? toolCall.arguments.attachments 
         : typeof toolCall.arguments.attachments === 'string'
           ? toolCall.arguments.attachments.split(',').map(a => a.trim()).filter(a => a.length > 0)
           : [])
+    : null;
+  const attachments = attachmentsRaw && attachmentsRaw.length > 0
+    ? normalizeCompleteAttachments(attachmentsRaw)
     : null;
   const follow_up_prompts = toolCall.arguments?.follow_up_prompts
     ? (Array.isArray(toolCall.arguments.follow_up_prompts)
