@@ -2,6 +2,7 @@ import os
 import base64
 import mimetypes
 import uuid
+import shlex
 from datetime import datetime
 from typing import Optional, Tuple
 from io import BytesIO
@@ -46,11 +47,11 @@ DEFAULT_PNG_COMPRESS_LEVEL = 6
     usage_guide="""
 ### VISUAL INPUT & IMAGE CONTEXT MANAGEMENT
 
-**CRITICAL: load_image is ONLY for actual IMAGE files. For PDFs and documents, use read_file instead.**
+**CRITICAL: Use load_image for visual analysis (images and PDF pages). Use read_file for text extraction.**
 
-**SUPPORTED FILE TYPES (IMAGES ONLY):**
+**SUPPORTED FILE TYPES (VISUAL):**
 - JPG, JPEG, PNG, GIF, WEBP, SVG
-- ❌ PDFs are NOT images - use read_file with file_path "uploads/document.pdf" instead
+- ✅ PDF pages (rendered to PNG for vision): use `file_path` + optional `page_number`
 - ❌ Documents (doc, docx, txt) are NOT images - use read_file instead
 - ❌ Data files (csv, json) are NOT images - use read_file instead
 
@@ -324,7 +325,7 @@ class SandboxVisionTool(SandboxToolsBase):
         "type": "function",
         "function": {
             "name": "load_image",
-            "description": """Loads an image file into conversation context from the /workspace directory or from a URL so you can see and analyze it.
+            "description": """Loads an image (or PDF page) into conversation context from the /workspace directory or from a URL so you can see and analyze it.
 
 ⚠️ HARD LIMIT: Maximum 3 images can be loaded in context at any time. Images consume 1000+ tokens each.
 
@@ -334,7 +335,12 @@ Images remain in the sandbox and can be loaded again anytime. SVG files are auto
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "**REQUIRED** - Either a relative path to the image file within the /workspace directory (e.g., 'screenshots/image.png') or a URL to an image (e.g., 'https://example.com/image.jpg'). Supported formats: JPG, PNG, GIF, WEBP, SVG. Max size: 10MB."
+                        "description": "**REQUIRED** - Either a relative path to an image/PDF file within the /workspace directory (e.g., 'screenshots/image.png', 'uploads/doc.pdf') or a URL to an image (e.g., 'https://example.com/image.jpg'). Supported visual formats: JPG, PNG, GIF, WEBP, SVG, PDF."
+                    },
+                    "page_number": {
+                        "type": "integer",
+                        "description": "**OPTIONAL** - PDF page number to render for visual analysis (1-based). Ignored for non-PDF files. Default: 1.",
+                        "minimum": 1
                     }
                 },
                 "required": ["file_path"],
@@ -342,7 +348,7 @@ Images remain in the sandbox and can be loaded again anytime. SVG files are auto
             }
         }
     })
-    async def load_image(self, file_path: str) -> ToolResult:
+    async def load_image(self, file_path: str, page_number: int = 1) -> ToolResult:
         """Loads an image file from local file system or from a URL, compresses it, uploads to cloud storage, and returns the public URL."""
         try:
             is_url = self.is_url(file_path)
@@ -369,30 +375,79 @@ Images remain in the sandbox and can be loaded again anytime. SVG files are auto
                 except Exception as e:
                     return self.fail_response(f"Image file not found at path: '{cleaned_path}'")
 
-                # Check file size
-                if file_info.size > MAX_IMAGE_SIZE:
-                    return self.fail_response(f"Image file '{cleaned_path}' is too large ({file_info.size / (1024*1024):.2f}MB). Maximum size is {MAX_IMAGE_SIZE / (1024*1024)}MB.")
-
-                # Read image file content
-                try:
-                    image_bytes = await self.sandbox.fs.download_file(full_path)
-                except Exception as e:
-                    return self.fail_response(f"Could not read image file: {cleaned_path}")
-
-                # Determine MIME type
+                # Determine MIME type and extension
                 mime_type, _ = mimetypes.guess_type(full_path)
-                if not mime_type or not mime_type.startswith('image/'):
-                    # Basic fallback based on extension if mimetypes fails
-                    ext = os.path.splitext(cleaned_path)[1].lower()
-                    if ext == '.jpg' or ext == '.jpeg': mime_type = 'image/jpeg'
-                    elif ext == '.png': mime_type = 'image/png'
-                    elif ext == '.gif': mime_type = 'image/gif'
-                    elif ext == '.webp': mime_type = 'image/webp'
-                    elif ext == '.svg': mime_type = 'image/svg+xml'
-                    else:
-                        return self.fail_response(f"Unsupported or unknown image format for file: '{cleaned_path}'. Supported: JPG, PNG, GIF, WEBP, SVG.")
-                
-                original_size = file_info.size
+                ext = os.path.splitext(cleaned_path)[1].lower()
+
+                is_pdf = mime_type == "application/pdf" or ext == ".pdf"
+                if is_pdf:
+                    if page_number < 1:
+                        return self.fail_response("page_number must be >= 1.")
+
+                    # PDF files can be larger because we convert one page to PNG.
+                    max_pdf_size = 100 * 1024 * 1024
+                    if file_info.size > max_pdf_size:
+                        return self.fail_response(
+                            f"PDF file '{cleaned_path}' is too large ({file_info.size / (1024*1024):.2f}MB). "
+                            f"Maximum supported size is {max_pdf_size / (1024*1024):.0f}MB."
+                        )
+
+                    temp_prefix = f"/tmp/load_image_{uuid.uuid4().hex}"
+                    temp_png = f"{temp_prefix}.png"
+                    escaped_pdf = shlex.quote(full_path)
+                    escaped_prefix = shlex.quote(temp_prefix)
+
+                    render_cmd = (
+                        f"pdftoppm -png -f {page_number} -singlefile -r 200 {escaped_pdf} {escaped_prefix}"
+                    )
+                    render_result = await self.sandbox.process.exec(render_cmd, timeout=90)
+                    if render_result.exit_code != 0:
+                        return self.fail_response(
+                            f"Failed to render PDF page {page_number} from '{cleaned_path}'. "
+                            f"Error: {render_result.result.strip() or 'unknown error'}"
+                        )
+
+                    try:
+                        image_bytes = await self.sandbox.fs.download_file(temp_png)
+                    except Exception:
+                        return self.fail_response(
+                            f"Rendered PDF page {page_number} but could not read generated image."
+                        )
+                    finally:
+                        # Best-effort cleanup
+                        await self.sandbox.process.exec(f"rm -f {shlex.quote(temp_png)}", timeout=10)
+
+                    mime_type = "image/png"
+                    original_size = len(image_bytes)
+                    cleaned_path = f"{cleaned_path}#page={page_number}"
+                else:
+                    # Check image file size
+                    if file_info.size > MAX_IMAGE_SIZE:
+                        return self.fail_response(
+                            f"Image file '{cleaned_path}' is too large ({file_info.size / (1024*1024):.2f}MB). "
+                            f"Maximum size is {MAX_IMAGE_SIZE / (1024*1024)}MB."
+                        )
+
+                    # Read image file content
+                    try:
+                        image_bytes = await self.sandbox.fs.download_file(full_path)
+                    except Exception:
+                        return self.fail_response(f"Could not read image file: {cleaned_path}")
+
+                    if not mime_type or not mime_type.startswith('image/'):
+                        # Basic fallback based on extension if mimetypes fails
+                        if ext == '.jpg' or ext == '.jpeg': mime_type = 'image/jpeg'
+                        elif ext == '.png': mime_type = 'image/png'
+                        elif ext == '.gif': mime_type = 'image/gif'
+                        elif ext == '.webp': mime_type = 'image/webp'
+                        elif ext == '.svg': mime_type = 'image/svg+xml'
+                        else:
+                            return self.fail_response(
+                                f"Unsupported or unknown visual format for file: '{cleaned_path}'. "
+                                f"Supported: JPG, PNG, GIF, WEBP, SVG, PDF."
+                            )
+
+                    original_size = file_info.size
             
 
             # Compress the image
