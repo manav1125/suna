@@ -7,6 +7,7 @@ from uuid import uuid4
 from cryptography.fernet import Fernet
 import os
 from urllib.parse import urlparse
+from urllib.parse import parse_qs
 
 from core.services.supabase import DBConnection
 from core.utils.logger import logger
@@ -67,10 +68,21 @@ class ComposioProfileService:
         """
         if not mcp_url:
             return mcp_url
+        parsed = urlparse(mcp_url)
+        existing = parse_qs(parsed.query or "")
+
+        # Preserve Composio-generated context as-is when already pinned.
+        # Some projects use connected_account_ids (plural) URLs.
+        has_user_context = any(
+            key in existing
+            for key in ("user_id", "connected_account_id", "connected_account_ids")
+        )
+        if has_user_context:
+            return mcp_url
+
         if not connected_account_id:
             return mcp_url
 
-        parsed = urlparse(mcp_url)
         normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?connected_account_id={connected_account_id}"
         return normalized
 
