@@ -21,10 +21,7 @@ export async function GET(request: NextRequest) {
   const termsAccepted = searchParams.get('terms_accepted') === 'true'
   const email = searchParams.get('email') || '' // Email passed from magic link redirect URL
 
-  // Use request origin for redirects (most reliable for local dev)
-  // This ensures localhost:3000 redirects stay on localhost, not staging
-  const requestOrigin = request.nextUrl.origin
-  const baseUrl = requestOrigin || process.env.NEXT_PUBLIC_URL || 'http://localhost:3000'
+  const baseUrl = resolveBaseUrl(request)
   const error = searchParams.get('error')
   const errorCode = searchParams.get('error_code')
   const errorDescription = searchParams.get('error_description')
@@ -194,4 +191,32 @@ export async function GET(request: NextRequest) {
   
   // No code or token - redirect to auth page
   return NextResponse.redirect(`${baseUrl}/auth`)
+}
+
+function resolveBaseUrl(request: NextRequest) {
+  const configuredPublicUrl = process.env.NEXT_PUBLIC_URL?.trim()
+  const requestOrigin = request.nextUrl.origin
+
+  if (process.env.NODE_ENV === 'production' && configuredPublicUrl) {
+    return configuredPublicUrl
+  }
+
+  try {
+    const hostname = new URL(requestOrigin).hostname.toLowerCase()
+    const isInternalHost =
+      hostname === '0.0.0.0' ||
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname.startsWith('10.') ||
+      hostname.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)
+
+    if (!isInternalHost) {
+      return requestOrigin
+    }
+  } catch {
+    // Fall through to configured URL/default.
+  }
+
+  return configuredPublicUrl || 'http://localhost:3000'
 }

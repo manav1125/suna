@@ -42,8 +42,8 @@ function ActivateTrialSkeleton() {
 export default function ActivateTrialPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const [startTrialError, setStartTrialError] = useState<string | null>(null);
   const { data: accountState, isLoading: isLoadingSubscription } = useAccountState({ enabled: !!user });
-  const subscription = accountState?.subscription;
   const { data: trialStatus, isLoading: isLoadingTrial } = useTrialStatus({ enabled: !!user });
   const startTrialMutation = useStartTrial();
   const { data: maintenanceNotice, isLoading: maintenanceLoading } = useMaintenanceNoticeQuery();
@@ -71,6 +71,7 @@ export default function ActivateTrialPage() {
   }, [accountState, trialStatus, isLoadingSubscription, isLoadingTrial, router]);
 
   const handleStartTrial = async () => {
+    setStartTrialError(null);
     try {
       const result = await startTrialMutation.mutateAsync({
         success_url: `${window.location.origin}/dashboard?trial=started`,
@@ -79,10 +80,25 @@ export default function ActivateTrialPage() {
 
       if (result.checkout_url) {
         window.location.href = result.checkout_url;
+        return;
       }
+
+      setStartTrialError('Unable to open trial checkout. Please try again.');
     } catch (error: any) {
+      const message = String(error?.message || '');
+      const normalized = message.toLowerCase();
+      const isStripeConfigError =
+        normalized.includes('no api key provided') ||
+        normalized.includes('invalid api key') ||
+        normalized.includes('stripe');
+
+      const displayMessage = isStripeConfigError
+        ? 'Trial checkout is unavailable right now because billing is not configured yet.'
+        : message || 'Failed to start trial. Please try again.';
+
       console.error('Failed to start trial:', error);
-      toast.error(error?.message || 'Failed to start trial. Please try again.');
+      setStartTrialError(displayMessage);
+      toast.error(displayMessage);
     }
   };
 
@@ -191,6 +207,9 @@ export default function ActivateTrialPage() {
                 </>
               )}
             </Button>
+            {startTrialError && (
+              <p className="text-sm text-red-500">{startTrialError}</p>
+            )}
           </div>
           <div className="text-center text-sm text-muted-foreground">
             By starting your trial, you agree to our{' '}
