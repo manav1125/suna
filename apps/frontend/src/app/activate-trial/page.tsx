@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { CreditCard, Zap, Shield, ArrowRight, CheckCircle, LogOut } from 'lucide-react';
 import { KortixLoader } from '@/components/ui/kortix-loader';
 import { toast } from '@/lib/toast';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { useState, useEffect, Suspense, lazy } from 'react';
 import { useTrialStatus, useStartTrial, useAccountState } from '@/hooks/billing';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -41,7 +41,6 @@ function ActivateTrialSkeleton() {
 
 export default function ActivateTrialPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const { user } = useAuth();
   const [startTrialError, setStartTrialError] = useState<string | null>(null);
   const { data: accountState, isLoading: isLoadingSubscription } = useAccountState({ enabled: !!user });
@@ -54,7 +53,11 @@ export default function ActivateTrialPage() {
   useEffect(() => {
     // Fallback safety: if Stripe or middleware lands us back on /activate-trial?trial=started,
     // bounce to dashboard where post-checkout state is resolved.
-    if (searchParams.get('trial') === 'started') {
+    const trialStartedParam =
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('trial') === 'started';
+
+    if (trialStartedParam) {
       router.replace('/dashboard?trial=started');
       return;
     }
@@ -76,7 +79,7 @@ export default function ActivateTrialPage() {
         router.push('/subscription');
       }
     }
-  }, [accountState, trialStatus, isLoadingSubscription, isLoadingTrial, router, searchParams]);
+  }, [accountState, trialStatus, isLoadingSubscription, isLoadingTrial, router]);
 
   const handleStartTrial = async () => {
     setStartTrialError(null);
