@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from core.utils.config import config
 
-TRIAL_ENABLED = False
+TRIAL_ENABLED = True
 TRIAL_DURATION_DAYS = 7
 TRIAL_TIER = "tier_2_20"
 TRIAL_CREDITS = Decimal("5.00")
@@ -93,7 +93,7 @@ TIERS: Dict[str, Tier] = {
         ],
         monthly_credits=Decimal('40.00'),
         display_name='Plus',
-        can_purchase_credits=False,
+        can_purchase_credits=True,
         models=['all'],
         # Frontend advertises "Unlimited Chats" on paid tiers.
         # Threads are effectively "chats" and each thread creates a project, so both
@@ -126,7 +126,7 @@ TIERS: Dict[str, Tier] = {
         ],
         monthly_credits=Decimal('100.00'),
         display_name='Pro',
-        can_purchase_credits=False,
+        can_purchase_credits=True,
         models=['all'],
         project_limit=UNLIMITED_PROJECT_LIMIT,  # 2x thread_limit
         thread_limit=UNLIMITED_THREAD_LIMIT,

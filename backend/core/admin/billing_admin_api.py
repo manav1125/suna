@@ -2,15 +2,27 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional, List
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from core.auth import require_admin, require_super_admin
 from core.billing.credits.manager import credit_manager
 from core.utils.logger import logger
 from core.admin import repo
+from core.services.supabase import DBConnection
 import stripe
 from core.utils.config import config
 
 router = APIRouter(prefix="/admin/billing", tags=["admin-billing"])
+
+
+def _extract_account_id_from_lookup(data) -> Optional[str]:
+    """Handle both RPC return shapes: json object or a one-item row list."""
+    if not data:
+        return None
+    if isinstance(data, dict):
+        return data.get('id')
+    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+        return data[0].get('id')
+    return None
 
 class CreditAdjustmentRequest(BaseModel):
     account_id: str
@@ -26,6 +38,13 @@ class RefundRequest(BaseModel):
     is_expiring: bool = Field(False, description="Refunds typically give non-expiring credits")
     stripe_refund: bool = False
     payment_intent_id: Optional[str] = None
+
+class CreditAdjustmentByEmailRequest(BaseModel):
+    email: EmailStr
+    amount: Decimal = Field(..., description="Amount to add (positive) or remove (negative)")
+    reason: str
+    is_expiring: bool = Field(True, description="Whether credits expire at end of billing cycle")
+    notify_user: bool = True
 
 @router.post("/credits/adjust")
 async def adjust_user_credits(
@@ -92,6 +111,44 @@ async def adjust_user_credits(
         raise
     except Exception as e:
         logger.error(f"Failed to adjust credits: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/credits/adjust-by-email")
+async def adjust_user_credits_by_email(
+    request: CreditAdjustmentByEmailRequest,
+    admin: dict = Depends(require_admin)
+):
+    """Admin helper for internal testing workflows: adjust credits by user email."""
+    try:
+        db = DBConnection()
+        await db.initialize()
+        client = await db.client
+
+        user_lookup = await client.rpc('get_user_account_by_email', {
+            'email_input': str(request.email).lower()
+        }).execute()
+
+        account_id = _extract_account_id_from_lookup(user_lookup.data)
+        if not account_id:
+            raise HTTPException(status_code=404, detail=f"User not found for email: {request.email}")
+
+        mapped_request = CreditAdjustmentRequest(
+            account_id=account_id,
+            amount=request.amount,
+            reason=request.reason,
+            is_expiring=request.is_expiring,
+            notify_user=request.notify_user,
+        )
+        result = await adjust_user_credits(mapped_request, admin)
+        return {
+            **result,
+            'account_id': account_id,
+            'email': str(request.email).lower(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to adjust credits by email: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/refund")

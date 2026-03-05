@@ -163,7 +163,7 @@ async def prewarm_user_context(account_id: str) -> None:
                     tier_info += "Scheduled triggers: 0 (upgrade to Plus or higher)\n"
                     tier_info += "App triggers: 0 (upgrade to Plus or higher)\n"
                 tier_info += "Concurrent runs: 1\n"
-                tier_info += "Credit purchases: Not available (upgrade to Ultra)\n"
+                tier_info += "Credit purchases: Not available (upgrade to Plus or higher)\n"
             else:
                 tier_info += "Tier type: Paid\n"
                 tier_info += f"Custom workers limit: {sub['custom_workers_limit']}\n"
@@ -171,7 +171,7 @@ async def prewarm_user_context(account_id: str) -> None:
                     tier_info += f"Scheduled triggers limit: {sub['scheduled_triggers_limit']}\n"
                     tier_info += f"App triggers limit: {sub['app_triggers_limit']}\n"
                 tier_info += f"Concurrent runs: {sub['concurrent_runs']}\n"
-                tier_info += f"Credit purchases: {'Available' if sub['can_purchase_credits'] else 'Not available (Ultra only)'}\n"
+                tier_info += f"Credit purchases: {'Available' if sub['can_purchase_credits'] else 'Not available for this plan'}\n"
             tier_info += "</user_subscription>"
             context_parts.append(tier_info)
 

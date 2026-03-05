@@ -103,7 +103,7 @@
     "referrals": {
       "title": "Freunde empfehlen & Credits verdienen",
       "description": "Lade Freunde zu VentureVerse ein und verdient beide",
-      "creditsPerReferral": "+400 Credits",
+      "creditsPerReferral": "+100 Credits",
       "youEarn": "Du verdienst",
       "friendGets": "Dein Freund bekommt",
       "maxEarnable": "Maximal verdienbar:",
@@ -281,7 +281,7 @@
   "sidebar": {
     "referAndEarn": "Empfehlen",
     "referralShareTitle": "Freunde empfehlen",
-    "referralShareSubtitle": "Erhalte 400 Credits",
+    "referralShareSubtitle": "Erhalte 100 Credits",
     "new": "Neu",
     "upgrade": "Upgrade",
     "chats": "Chats",

@@ -68,7 +68,7 @@ import {
 } from '@/components/ui/dialog';
 import { createClient } from '@/lib/supabase/client';
 import { useTheme } from 'next-themes';
-import { isLocalMode, isProductionMode } from '@/lib/config';
+import { isLocalMode } from '@/lib/config';
 import { clearUserLocalStorage } from '@/lib/utils/clear-local-storage';
 import { UserSettingsModal } from '@/components/settings/user-settings-modal';
 import { PlanSelectionModal } from '@/components/billing/pricing';
@@ -212,21 +212,19 @@ export function NavUserWithTeams({
           {/* Buttons Container - Above user card */}
           <div className="absolute bottom-full left-0 right-0 mb-2 px-0 group-data-[collapsible=icon]:hidden z-50 flex flex-col gap-2">
             {/* Referral Button - Above Upgrade */}
-            {!isProductionMode() && (
-              <SpotlightCard className="bg-zinc-200/60 dark:bg-zinc-800/60 backdrop-blur-md cursor-pointer">
-                <div
-                  onClick={openReferralDialog}
-                  className="flex items-center gap-3 px-3 py-2.5"
-                >
-                  <Heart className="h-4 w-4 text-zinc-700 dark:text-zinc-300 flex-shrink-0" />
-                  <div className="flex-1 text-left">
-                    <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{t('referralShareTitle')}</div>
-                    <div className="text-xs text-zinc-600 dark:text-zinc-400">{t('referralShareSubtitle')}</div>
-                  </div>
-                  <ChevronRight className="h-4 w-4 text-zinc-500 flex-shrink-0" />
+            <SpotlightCard className="bg-zinc-200/60 dark:bg-zinc-800/60 backdrop-blur-md cursor-pointer">
+              <div
+                onClick={openReferralDialog}
+                className="flex items-center gap-3 px-3 py-2.5"
+              >
+                <Heart className="h-4 w-4 text-zinc-700 dark:text-zinc-300 flex-shrink-0" />
+                <div className="flex-1 text-left">
+                  <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{t('referralShareTitle')}</div>
+                  <div className="text-xs text-zinc-600 dark:text-zinc-400">{t('referralShareSubtitle')}</div>
                 </div>
-              </SpotlightCard>
-            )}
+                <ChevronRight className="h-4 w-4 text-zinc-500 flex-shrink-0" />
+              </div>
+            </SpotlightCard>
             {/* Upgrade Button - Closest to user card */}
             {isFreeTier && (
               <Button

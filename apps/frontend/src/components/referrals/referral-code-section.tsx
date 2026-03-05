@@ -39,7 +39,7 @@ export function ReferralCodeSection({ referralCode, isLoading }: ReferralCodeSec
       try {
         await navigator.share({
           title: 'Join VentureVerse with my referral link',
-          text: 'Get 400 free credits when you sign up with my referral link!',
+          text: 'Get 100 credits when you sign up with my referral link!',
           url: referralCode.referral_url,
         });
       } catch (error) {

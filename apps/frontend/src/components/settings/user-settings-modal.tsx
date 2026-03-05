@@ -43,7 +43,7 @@ import {
 } from '@/components/ui/tooltip';
 import { createClient } from '@/lib/supabase/client';
 import { toast } from '@/lib/toast';
-import { isLocalMode, isProductionMode } from '@/lib/config';
+import { isLocalMode } from '@/lib/config';
 import { backendApi } from '@/lib/api-client';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Switch } from '@/components/ui/switch';
@@ -128,14 +128,13 @@ export function UserSettingsModal({
     const [activeTab, setActiveTab] = useState<TabId>(defaultTab);
     const [showPlanModal, setShowPlanModal] = useState(false);
     const isLocal = isLocalMode();
-    const isProduction = isProductionMode();
     const tabs: Tab[] = [
         { id: 'general', label: 'General', icon: Settings },
         { id: 'plan', label: 'Plan', icon: Zap },
         { id: 'billing', label: 'Billing', icon: CreditCard },
         { id: 'usage', label: 'Usage', icon: TrendingDown },
         { id: 'memory', label: 'Memory', icon: Brain },
-        ...(!isProduction ? [{ id: 'referrals' as TabId, label: 'Referrals', icon: Users }] : []),
+        { id: 'referrals', label: 'Referrals', icon: Users },
         { id: 'knowledge-base', label: 'Knowledge Base', icon: FileText },
         { id: 'integrations', label: 'Integrations', icon: Plug },
         { id: 'api-keys', label: 'API Keys', icon: Key },
@@ -1342,5 +1341,4 @@ function EnvManagerTab() {
         </div>
     );
 }
-
 
