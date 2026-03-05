@@ -201,8 +201,25 @@ function resolveBaseUrl(request: NextRequest) {
     return configuredPublicUrl
   }
 
+  const forwardedProto = request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim()
+  const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim()
+  if (forwardedHost) {
+    const originFromForwarded = `${forwardedProto || 'https'}://${forwardedHost}`
+    if (!isInternalOrigin(originFromForwarded)) {
+      return originFromForwarded
+    }
+  }
+
+  if (!isInternalOrigin(requestOrigin)) {
+    return requestOrigin
+  }
+
+  return configuredPublicUrl || 'http://localhost:3000'
+}
+
+function isInternalOrigin(origin: string) {
   try {
-    const hostname = new URL(requestOrigin).hostname.toLowerCase()
+    const hostname = new URL(origin).hostname.toLowerCase()
     const isInternalHost =
       hostname === '0.0.0.0' ||
       hostname === 'localhost' ||
@@ -211,12 +228,8 @@ function resolveBaseUrl(request: NextRequest) {
       hostname.startsWith('192.168.') ||
       /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname)
 
-    if (!isInternalHost) {
-      return requestOrigin
-    }
+    return isInternalHost
   } catch {
-    // Fall through to configured URL/default.
+    return true
   }
-
-  return configuredPublicUrl || 'http://localhost:3000'
 }
