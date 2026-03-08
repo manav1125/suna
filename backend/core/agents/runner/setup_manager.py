@@ -21,24 +21,33 @@ async def prepopulate_caches_for_new_thread(
     mode: Optional[str],
 ) -> None:
     from core.cache.runtime_cache import set_cached_message_history, get_cached_project_metadata, set_cached_project_metadata
-    
+
     if message_content and message_content.strip():
         initial_messages = [{
             "role": "user",
             "content": message_content,
             "message_id": str(uuid.uuid4())
         }]
-        await set_cached_message_history(thread_id, initial_messages)
-    
+        try:
+            await set_cached_message_history(thread_id, initial_messages)
+        except Exception as e:
+            logger.warning(f"Failed to prepopulate message history cache for {thread_id}: {e}")
+
     has_images = len(image_contexts) > 0
     cache_key = f"thread_has_images:{thread_id}"
-    await redis.set(cache_key, "1" if has_images else "0", ex=7200 if has_images else 300)
-    
+    try:
+        await redis.set(cache_key, "1" if has_images else "0", ex=7200 if has_images else 300)
+    except Exception as e:
+        logger.warning(f"Failed to cache thread image flag for {thread_id}: {e}")
+
     if mode:
-        existing = await get_cached_project_metadata(project_id)
-        existing_sandbox = existing.get('sandbox', {}) if existing else {}
-        project_metadata = {**existing_sandbox, "mode": mode}
-        await set_cached_project_metadata(project_id, project_metadata)
+        try:
+            existing = await get_cached_project_metadata(project_id)
+            existing_sandbox = existing.get('sandbox', {}) if existing else {}
+            project_metadata = {**existing_sandbox, "mode": mode}
+            await set_cached_project_metadata(project_id, project_metadata)
+        except Exception as e:
+            logger.warning(f"Failed to cache project metadata for {project_id}: {e}")
 
 
 async def invalidate_caches_for_existing_thread(thread_id: str) -> None:

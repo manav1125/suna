@@ -603,19 +603,23 @@ async def _background_setup_and_execute(
     try:
         final_message_content = prompt
         image_contexts_to_inject = []
+        cache_prep_task = None
+        cache_updated = False
         
         # Note: Project and sandbox are now created upfront in start_agent_run()
         # Files are uploaded directly to sandbox by frontend after receiving sandbox_id
         
         if is_new_thread:
-            await prepopulate_caches_for_new_thread(
-                thread_id=thread_id,
-                project_id=project_id,
-                message_content=final_message_content,
-                image_contexts=image_contexts_to_inject,
-                mode=mode,
+            # Cache warmup is a UX optimization; it must never block thread persistence.
+            cache_prep_task = asyncio.create_task(
+                prepopulate_caches_for_new_thread(
+                    thread_id=thread_id,
+                    project_id=project_id,
+                    message_content=final_message_content,
+                    image_contexts=image_contexts_to_inject,
+                    mode=mode,
+                )
             )
-            cache_updated = False
         else:
             cache_updated = await append_user_message_to_cache(thread_id, final_message_content)
             if not cache_updated:
@@ -673,6 +677,17 @@ async def _background_setup_and_execute(
         
         db_task = asyncio.create_task(do_db_writes())
         logger.info(f"✅ [BG] Starting agent execution")
+
+        if cache_prep_task:
+            def _log_cache_prep_result(task: asyncio.Task, current_thread_id: str) -> None:
+                try:
+                    task.result()
+                except Exception as cache_err:
+                    logger.warning(f"⚠️ [BG] Cache prepopulation failed for {current_thread_id}: {cache_err}")
+
+            cache_prep_task.add_done_callback(
+                lambda task, current_thread_id=thread_id: _log_cache_prep_result(task, current_thread_id)
+            )
         
         cleanup_reason = None
         final_status = "unknown"
