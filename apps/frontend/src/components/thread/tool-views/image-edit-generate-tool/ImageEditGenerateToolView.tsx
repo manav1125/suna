@@ -343,6 +343,8 @@ export function ImageEditGenerateToolView({
   } = useMemo(() => {
     if (!toolCall) {
       return {
+        prompt: null as string | null,
+        status: null as string | null,
         generatedImagePaths: [] as string[],
         generatedVideoPaths: [] as string[],
         isVideoMode: false,

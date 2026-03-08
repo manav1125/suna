@@ -26,12 +26,14 @@ if TYPE_CHECKING:
 
 **MANDATORY QUALITY GATES (DO NOT SKIP):**
 - If you call `load_template_design` with `presentation_name`, you MUST then call `full_file_rewrite` on the copied slide files before completing.
+- If you are using a built-in template, do NOT use `create_slide`; template workflows must stay in the copied template files.
 - Never finish right after template copy; template copy is setup only, not final output.
 - Every custom slide must include a clear visual structure (styled layout, chart/table/image/iconography), not plain text-only HTML.
 - If using `../images/...` paths, ensure those files actually exist first. If they do not, use direct HTTPS image URLs.
 
 **🚨 CRITICAL: This tool provides the create_slide function for presentations!**
-- **ALWAYS** use create_slide when creating presentation slides
+- **Use create_slide ONLY for custom-theme presentations**
+- **For template-based presentations, load the template with `presentation_name` and then use `full_file_rewrite`**
 - **NEVER** use generic create_file to create presentation slides
 - This tool is specialized for presentation creation with proper formatting, validation, and navigation
 
@@ -210,7 +212,7 @@ Follow this workflow for every presentation. **Complete each phase fully before 
 **Phase 4: Slide Creation** (USE AS MANY IMAGES AS POSSIBLE)
 **Only start after Phase 3 checkpoint - all images must be downloaded and verified.**
 
-1. **Create Slides in PARALLEL** (MANDATORY): Use the `create_slide` tool to create ALL slides simultaneously using parallel execution. **DO NOT create slides one-by-one sequentially** - create them all at once in parallel for efficiency:
+1. **Create Slides in PARALLEL** (MANDATORY FOR CUSTOM THEMES ONLY): Use the `create_slide` tool to create ALL slides simultaneously using parallel execution. **DO NOT create slides one-by-one sequentially** - create them all at once in parallel for efficiency:
    
    **🚨 CRITICAL - EXACT PARAMETER NAMES REQUIRED:**
    - **MUST use**: `presentation_name` (string) - Name of the presentation folder
