@@ -115,7 +115,34 @@ class SandboxFilesTool(SandboxToolsBase):
         except Exception:
             return False
 
-    async def _touch_presentation_metadata_if_slide(self, file_path: str) -> None:
+    def _extract_visible_text_from_html(self, html: str) -> str:
+        body_match = re.search(r"<body[^>]*>([\s\S]*)</body>", html or "", flags=re.IGNORECASE)
+        body_html = body_match.group(1) if body_match else (html or "")
+        body_without_style_script = re.sub(r"<style[\s\S]*?</style>", " ", body_html, flags=re.IGNORECASE)
+        body_without_style_script = re.sub(r"<script[\s\S]*?</script>", " ", body_without_style_script, flags=re.IGNORECASE)
+        visible_text = re.sub(r"<[^>]+>", " ", body_without_style_script)
+        return re.sub(r"\s+", " ", visible_text).strip()
+
+    def _extract_slide_title_from_html(self, html: str, slide_number: str) -> str:
+        patterns = [
+            r"<h1[^>]*>([\s\S]*?)</h1>",
+            r"<div[^>]*class=[\"'][^\"']*(?:header|slide-title|main-heading|title)[^\"']*[\"'][^>]*>([\s\S]*?)</div>",
+            r"<title>([\s\S]*?)</title>",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html or "", flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = re.sub(r"<[^>]+>", " ", match.group(1))
+            candidate = re.sub(r"\s+", " ", candidate).strip()
+            if not candidate:
+                continue
+            candidate = re.sub(r"\s*-\s*slide\s+\d+\s*$", "", candidate, flags=re.IGNORECASE).strip()
+            if candidate:
+                return candidate
+        return f"Slide {slide_number}"
+
+    async def _touch_presentation_metadata_if_slide(self, file_path: str, file_contents: Optional[str] = None) -> None:
         """
         If the changed file is a presentation slide, bump metadata.updated_at so
         frontend viewers can refresh cached iframe previews reliably.
@@ -142,6 +169,8 @@ class SandboxFilesTool(SandboxToolsBase):
             slides = metadata.get("slides")
             if isinstance(slides, dict) and slide_number in slides and isinstance(slides[slide_number], dict):
                 slides[slide_number]["updated_at"] = now_iso
+                if file_contents:
+                    slides[slide_number]["title"] = self._extract_slide_title_from_html(file_contents, slide_number)
 
             await self.sandbox.fs.upload_file(json.dumps(metadata, indent=2).encode(), metadata_path)
         except Exception as e:
@@ -151,7 +180,11 @@ class SandboxFilesTool(SandboxToolsBase):
         cleaned = self.clean_path(file_path)
         return bool(self._presentation_slide_pattern.match(cleaned))
 
-    def _validate_presentation_slide_html(self, file_contents: str) -> Optional[str]:
+    def _validate_presentation_slide_html(
+        self,
+        file_contents: str,
+        existing_file_contents: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Guardrails for template-slide rewrites:
         - Must remain a full HTML document
@@ -167,11 +200,7 @@ class SandboxFilesTool(SandboxToolsBase):
 
         body_match = re.search(r"<body[^>]*>([\s\S]*)</body>", file_contents, flags=re.IGNORECASE)
         body_html = body_match.group(1) if body_match else file_contents
-
-        body_without_style_script = re.sub(r"<style[\s\S]*?</style>", " ", body_html, flags=re.IGNORECASE)
-        body_without_style_script = re.sub(r"<script[\s\S]*?</script>", " ", body_without_style_script, flags=re.IGNORECASE)
-        visible_text = re.sub(r"<[^>]+>", " ", body_without_style_script)
-        visible_text = re.sub(r"\s+", " ", visible_text).strip()
+        visible_text = self._extract_visible_text_from_html(file_contents)
 
         has_visual_elements = any(
             marker in lowered for marker in ("<img", "<svg", "<canvas", "<video", "<iframe", "<table")
@@ -192,6 +221,20 @@ class SandboxFilesTool(SandboxToolsBase):
                 "Preserve the template layout and replace placeholders with real data."
             )
 
+        raw_markup_patterns = [
+            r"(^|\s)div class\s*=",
+            r"(^|\s)section class\s*=",
+            r"(^|\s)span class\s*=",
+            r"(^|\s)main-content\b",
+            r"(^|\s)contact-(label|value)\b",
+            r"&lt;/?(?:div|section|span|header|footer|main)\b",
+        ]
+        if any(re.search(pattern, visible_text, flags=re.IGNORECASE) for pattern in raw_markup_patterns):
+            return (
+                "Presentation slide rewrite rejected: raw HTML fragments are appearing as visible text. "
+                "Keep tags valid HTML markup and replace only the displayed content."
+            )
+
         placeholder_hits = []
         placeholder_markers = [
             "lorem ipsum",
@@ -200,16 +243,42 @@ class SandboxFilesTool(SandboxToolsBase):
             "brightpath",
             "insert your",
             "placeholder",
+            "elevate pitch deck 2024",
+            "elevate@gmail.com",
+            "www.elevate.media",
+            "at elevate, we provide dynamic cloud-based solutions designed to optimize project management, crm, and erp.",
         ]
         for marker in placeholder_markers:
             if marker in lowered:
                 placeholder_hits.append(marker)
 
-        if "brightpath" in placeholder_hits or "lorem ipsum" in placeholder_hits:
+        if placeholder_hits:
             return (
                 "Presentation slide rewrite rejected: template placeholder text still present "
                 f"({', '.join(sorted(set(placeholder_hits)))}). Replace with requested content."
             )
+
+        if existing_file_contents:
+            previous_visible_text = self._extract_visible_text_from_html(existing_file_contents)
+            previous_tokens = {
+                token for token in re.findall(r"[a-z0-9]{4,}", previous_visible_text.lower())
+                if token not in {"slide", "presentation", "thank", "your", "2024"}
+            }
+            rewritten_tokens = {
+                token for token in re.findall(r"[a-z0-9]{4,}", visible_text.lower())
+                if token not in {"slide", "presentation", "thank", "your", "2024"}
+            }
+            if len(previous_tokens) >= 12 and rewritten_tokens:
+                overlap_ratio = len(previous_tokens & rewritten_tokens) / max(len(previous_tokens), 1)
+                previous_has_template_markers = any(
+                    marker in previous_visible_text.lower()
+                    for marker in ("brightpath", "elevate", "yourwebsite.org", "lorem ipsum")
+                )
+                if previous_has_template_markers and overlap_ratio >= 0.65:
+                    return (
+                        "Presentation slide rewrite rejected: the rewritten slide is still too close to the copied "
+                        "template copy. Replace the original template text with the requested project-specific content."
+                    )
 
         return None
 
@@ -560,14 +629,19 @@ Usage:
             if not await self._file_exists(full_path):
                 return self.fail_response(f"File '{file_path}' does not exist. Use create_file to create a new file.")
 
+            existing_file_contents = None
             if self._is_presentation_slide_file(file_path):
-                validation_error = self._validate_presentation_slide_html(file_contents)
+                existing_file_contents = (await self.sandbox.fs.download_file(full_path)).decode()
+                validation_error = self._validate_presentation_slide_html(
+                    file_contents,
+                    existing_file_contents=existing_file_contents,
+                )
                 if validation_error:
                     return self.fail_response(validation_error)
 
             await self.sandbox.fs.upload_file(file_contents.encode(), full_path)
             await self.sandbox.fs.set_file_permissions(full_path, permissions)
-            await self._touch_presentation_metadata_if_slide(file_path)
+            await self._touch_presentation_metadata_if_slide(file_path, file_contents=file_contents)
             
             message = f"File '{file_path}' completely rewritten successfully."
 

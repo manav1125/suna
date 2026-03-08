@@ -26,6 +26,23 @@ class ConnectedAccount(BaseModel):
 class ConnectedAccountService:
     def __init__(self, api_key: Optional[str] = None):
         self.client = ComposioClient.get_client(api_key)
+
+    def _extract_auth_config_id(self, source) -> str:
+        direct = getattr(source, 'auth_config_id', None)
+        if direct:
+            return direct
+
+        auth_config_obj = getattr(source, 'auth_config', None)
+        if auth_config_obj is not None:
+            nested_id = getattr(auth_config_obj, 'id', None)
+            if nested_id:
+                return nested_id
+            if hasattr(auth_config_obj, '__dict__'):
+                nested_id = auth_config_obj.__dict__.get('id')
+                if nested_id:
+                    return nested_id
+
+        return ""
     
     def _extract_deprecated_value(self, deprecated_obj) -> Optional[bool]:
         if deprecated_obj is None:
@@ -168,7 +185,7 @@ class ConnectedAccountService:
                 redirect_url=getattr(response, 'redirect_url', None),
                 redirect_uri=getattr(response, 'redirect_uri', None),
                 connection_data=connection_data,
-                auth_config_id=getattr(response, 'auth_config_id', ''),
+                auth_config_id=self._extract_auth_config_id(response),
                 user_id=getattr(response, 'user_id', ''),
                 deprecated=deprecated_value
             )
@@ -196,14 +213,33 @@ class ConnectedAccountService:
             logger.error(f"Failed to get auth status: {e}", exc_info=True)
             raise
     
-    async def list_connected_accounts(self, auth_config_id: Optional[str] = None) -> List[ConnectedAccount]:
+    async def list_connected_accounts(
+        self,
+        auth_config_ids: Optional[List[str] | str] = None,
+        toolkit_slugs: Optional[List[str] | str] = None,
+        statuses: Optional[List[str]] = None,
+    ) -> List[ConnectedAccount]:
         try:
-            logger.debug(f"Listing connected accounts for auth_config: {auth_config_id}")
-            
-            if auth_config_id:
-                response = await asyncio.to_thread(self.client.connected_accounts.list, auth_config_id=auth_config_id)
-            else:
-                response = await asyncio.to_thread(self.client.connected_accounts.list)
+            logger.debug(
+                "Listing connected accounts",
+                auth_config_ids=auth_config_ids,
+                toolkit_slugs=toolkit_slugs,
+                statuses=statuses,
+            )
+
+            request_kwargs = {}
+            if auth_config_ids:
+                if isinstance(auth_config_ids, str):
+                    auth_config_ids = [auth_config_ids]
+                request_kwargs["auth_config_ids"] = auth_config_ids
+            if toolkit_slugs:
+                if isinstance(toolkit_slugs, str):
+                    toolkit_slugs = [toolkit_slugs]
+                request_kwargs["toolkit_slugs"] = toolkit_slugs
+            if statuses:
+                request_kwargs["statuses"] = statuses
+
+            response = await asyncio.to_thread(self.client.connected_accounts.list, **request_kwargs)
             
             connected_accounts = []
             items = getattr(response, 'items', [])
@@ -235,7 +271,7 @@ class ConnectedAccountService:
                     redirect_url=getattr(item, 'redirect_url', None),
                     redirect_uri=getattr(item, 'redirect_uri', None),
                     connection_data=connection_data,
-                    auth_config_id=getattr(item, 'auth_config_id', auth_config_id or ''),
+                    auth_config_id=self._extract_auth_config_id(item),
                     user_id=getattr(item, 'user_id', ''),
                     deprecated=deprecated_value
                 )

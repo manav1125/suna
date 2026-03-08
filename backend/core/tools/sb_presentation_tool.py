@@ -699,7 +699,7 @@ class SandboxPresentationTool(SandboxToolsBase):
         
         # Update presentation name and preserve slides structure
         metadata["presentation_name"] = presentation_name
-        metadata["title"] = template_metadata.get("title", presentation_name)
+        metadata["title"] = presentation_name
         metadata["description"] = template_metadata.get("description", "")
         metadata["created_at"] = datetime.now().isoformat()
         metadata["updated_at"] = datetime.now().isoformat()
@@ -710,7 +710,7 @@ class SandboxPresentationTool(SandboxToolsBase):
             for slide_num, slide_data in template_metadata["slides"].items():
                 slide_filename = slide_data.get("filename", f"slide_{int(slide_num):02d}.html")
                 updated_slides[str(slide_num)] = {
-                    "title": slide_data.get("title", f"Slide {slide_num}"),
+                    "title": f"Slide {slide_num}",
                     "filename": slide_filename,
                     "file_path": f"{self.presentations_dir}/{safe_name}/{slide_filename}",
                     "preview_url": f"{self.workspace_path}/{self.presentations_dir}/{safe_name}/{slide_filename}",
