@@ -358,6 +358,51 @@ class SandboxPresentationTool(SandboxToolsBase):
         """Convert presentation name to safe filename"""
         return "".join(c for c in name if c.isalnum() or c in "-_").lower()
 
+    def _normalize_identifier(self, value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower())
+        return normalized.strip("_")
+
+    def _resolve_template_name(self, template_name: str) -> Optional[str]:
+        requested = (template_name or "").strip()
+        if not requested:
+            return None
+
+        direct_path = os.path.join(self.templates_dir, requested)
+        if os.path.isdir(direct_path):
+            return requested
+
+        normalized_requested = {
+            requested.lower(),
+            self._normalize_identifier(requested),
+            re.sub(r"[^a-z0-9]+", "", requested.lower()),
+        }
+        normalized_requested.discard("")
+
+        for item in os.listdir(self.templates_dir):
+            template_path = os.path.join(self.templates_dir, item)
+            if not os.path.isdir(template_path):
+                continue
+
+            metadata = self._load_template_metadata(item)
+            template_aliases = {
+                item,
+                metadata.get("title", ""),
+                metadata.get("presentation_name", ""),
+            }
+
+            normalized_aliases = set()
+            for alias in template_aliases:
+                if not alias:
+                    continue
+                normalized_aliases.add(alias.lower())
+                normalized_aliases.add(self._normalize_identifier(alias))
+                normalized_aliases.add(re.sub(r"[^a-z0-9]+", "", alias.lower()))
+
+            if normalized_requested & normalized_aliases:
+                return item
+
+        return requested
+
     async def _get_metadata_lock(self, presentation_path: str) -> asyncio.Lock:
         """Get/create a per-presentation lock to avoid metadata races across parallel slide writes."""
         async with self._metadata_locks_guard:
@@ -386,6 +431,37 @@ class SandboxPresentationTool(SandboxToolsBase):
 
         plain_tags = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li", "strong", "em", "b", "i", "a", "span", "br", "small"}
         return all(tag in plain_tags for tag in tags)
+
+    def _validate_slide_content_workflow(self, slide_content: str) -> Optional[str]:
+        lowered = (slide_content or "").lower()
+
+        placeholder_markers = [
+            "presentation template",
+            "welcome to brightpath",
+            "brightpath",
+            "yourwebsite.org",
+            "lorem ipsum",
+        ]
+        placeholder_hits = [marker for marker in placeholder_markers if marker in lowered]
+        if placeholder_hits:
+            return (
+                "Slide content rejected because template placeholder text is still present "
+                f"({', '.join(sorted(set(placeholder_hits)))}). Replace placeholder copy with researched content."
+            )
+
+        class_attr_count = len(re.findall(r"\bclass\s*=", slide_content, flags=re.IGNORECASE))
+        inline_style_count = len(re.findall(r"\bstyle\s*=", slide_content, flags=re.IGNORECASE))
+        has_style_block = "<style" in lowered
+
+        if class_attr_count >= 4 and not has_style_block and inline_style_count < 2:
+            return (
+                "Slide content rejected because it relies on CSS classes without any accompanying styles. "
+                "This usually means template HTML was copied into create_slide. For template-based presentations, "
+                "call load_template_design with presentation_name and then rewrite the copied slide HTML files with "
+                "full_file_rewrite. For custom slides, include a <style> block or inline styles so the slide renders correctly."
+            )
+
+        return None
 
     def _apply_visual_baseline(self, slide_content: str, slide_title: str) -> str:
         """Wrap plain content in a branded visual shell so slides are never text-only placeholders."""
@@ -766,6 +842,7 @@ class SandboxPresentationTool(SandboxToolsBase):
         If presentation_name is provided, copies the entire template to workspace for editing.
         """
         try:
+            template_name = self._resolve_template_name(template_name)
             template_path = os.path.join(self.templates_dir, template_name)
             
             if not os.path.exists(template_path):
@@ -1054,6 +1131,10 @@ class SandboxPresentationTool(SandboxToolsBase):
             
             if not content:
                 return self.fail_response("Slide content is required.")
+
+            workflow_error = self._validate_slide_content_workflow(content)
+            if workflow_error:
+                return self.fail_response(workflow_error)
             
             # Ensure presentation directory exists
             safe_name, presentation_path = await self._ensure_presentation_dir(presentation_name)

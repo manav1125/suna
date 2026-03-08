@@ -784,6 +784,11 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
       .join(' ');
   }, []);
 
+  const buildTemplateWorkflowInstruction = useCallback((templateId: string) => {
+    const templateName = formatTemplateName(templateId);
+    return `Use the presentation template with exact id "${templateId}" (${templateName}). First call load_template_design with template_name="${templateId}" and a presentation_name. Then rewrite the copied slide HTML files with full_file_rewrite. Preserve the template styling and structure. Do not use create_slide for this template-based presentation.`;
+  }, [formatTemplateName]);
+
   // Mode Starter handlers
   const handleModeStarterAction = useCallback(async (
     method: 'prompt' | 'pdf' | 'link', 
@@ -821,19 +826,19 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
       }
     } else {
       // Presentation mode (existing logic)
-      const templateName = template ? formatTemplateName(template) : '';
+      const templateWorkflow = template ? buildTemplateWorkflowInstruction(template) : '';
       
       switch (method) {
         case 'prompt':
           if (template) {
-            prompt = `Initialize the tools. Create a presentation using the ${templateName} template style. I want to create slides about `;
+            prompt = `Initialize the tools. ${templateWorkflow} I want to create slides about `;
           } else {
             prompt = `Initialize the tools. Create a presentation about `;
           }
           break;
         case 'pdf':
           if (template) {
-            prompt = `Initialize the tools. Convert this file into slides using the ${templateName} template style. `;
+            prompt = `Initialize the tools. ${templateWorkflow} Convert this file into slides. `;
           } else {
             prompt = `Initialize the tools. Convert this file into slides. `;
           }
@@ -843,7 +848,7 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
           break;
         case 'link':
           if (template) {
-            prompt = `Initialize the tools. Create slides from this URL using the ${templateName} template style: ${data?.url || ''}`;
+            prompt = `Initialize the tools. ${templateWorkflow} Create slides from this URL: ${data?.url || ''}`;
           } else {
             prompt = `Initialize the tools. Create slides from this URL: ${data?.url || ''}`;
           }
@@ -865,17 +870,14 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
     if (!isSidePanelOpen) {
       toggleSidePanel();
     }
-  }, [isSidePanelOpen, toggleSidePanel, formatTemplateName, modeStarter]);
+  }, [isSidePanelOpen, toggleSidePanel, buildTemplateWorkflowInstruction, modeStarter]);
 
   const handleModeStarterTemplate = useCallback((templateId: string) => {
     console.log('[ThreadComponent] Template selected:', templateId);
     setSelectedTemplate(templateId);
-    
-    // Format template name nicely
-    const templateName = formatTemplateName(templateId);
-    
+
     // Fill the chat input with a prompt using this template
-    const prompt = `Initialize the tools. Create a presentation using the ${templateName} template style. I want to create slides about `;
+    const prompt = `Initialize the tools. ${buildTemplateWorkflowInstruction(templateId)} I want to create slides about `;
     chatInputRef.current?.setValue(prompt);
     chatInputRef.current?.focus();
     
@@ -889,7 +891,7 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
     if (!isSidePanelOpen) {
       toggleSidePanel();
     }
-  }, [isSidePanelOpen, toggleSidePanel, formatTemplateName]);
+  }, [isSidePanelOpen, toggleSidePanel, buildTemplateWorkflowInstruction]);
 
   const handleModeStarterClose = useCallback(() => {
     console.log('[ThreadComponent] Mode starter closed');

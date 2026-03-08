@@ -1146,8 +1146,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
       if (selectedMode !== 'slides' || !selectedTemplate) {
         return '';
       }
-      
-      return `\n\n----\n\n**Presentation Template:** ${selectedTemplate}`;
+
+      const templateDisplayName = selectedTemplate
+        .split('_')
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+
+      return [
+        '',
+        '',
+        '----',
+        '',
+        '**Presentation Template Workflow (Required):**',
+        `- Exact template id: ${selectedTemplate}`,
+        `- Display name: ${templateDisplayName}`,
+        `- First call load_template_design with template_name="${selectedTemplate}" and a presentation_name`,
+        '- Then rewrite the copied slide HTML files with full_file_rewrite',
+        '- Preserve the template CSS and layout structure',
+        '- Do not use create_slide for this template-based presentation',
+      ].join('\n');
     }, [selectedMode, selectedTemplate]);
 
     // Handle mode deselection with animation - also clears the input value

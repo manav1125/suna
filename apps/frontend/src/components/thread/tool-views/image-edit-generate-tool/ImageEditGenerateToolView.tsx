@@ -1,11 +1,11 @@
 import React, { useMemo, useState, useRef } from 'react';
-import { AlertTriangle, Play, Pause, Wand2, CheckCircle, Download, Video as VideoIcon, Image as ImageIcon } from 'lucide-react';
+import { AlertTriangle, Play, Pause, Wand2, Download, Video as VideoIcon, Image as ImageIcon } from 'lucide-react';
 import { ToolViewProps } from '../types';
 import { extractImageEditGenerateData } from './_utils';
-import { cn } from '@/lib/utils';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Progress } from '@/components/ui/progress';
 import { useImageContent } from '@/hooks/files';
 import { useFileContentQuery } from '@/hooks/files/use-file-queries';
 import { VideoRenderer } from '@/components/file-renderers/video-renderer';
@@ -54,6 +54,48 @@ function ShimmerBox({ aspectVideo = false }: { aspectVideo?: boolean }) {
           100% { background-position: -200% 0; }
         }
       `}</style>
+    </div>
+  );
+}
+
+function MediaLoadingState({
+  aspectVideo = false,
+  progress,
+  statusLabel,
+  prompt,
+}: {
+  aspectVideo?: boolean;
+  progress: number;
+  statusLabel: string;
+  prompt?: string | null;
+}) {
+  return (
+    <div className="relative">
+      <ShimmerBox aspectVideo={aspectVideo} />
+      <div className="absolute inset-0 flex items-center justify-center p-6">
+        <div className="w-full max-w-sm rounded-2xl border border-white/40 bg-white/78 p-5 shadow-xl backdrop-blur-md dark:border-zinc-700/80 dark:bg-zinc-950/80">
+          <div className="mb-4 flex items-center gap-2">
+            <Badge variant="secondary" className="gap-1.5">
+              <Wand2 className="h-3.5 w-3.5" />
+              Generating
+            </Badge>
+          </div>
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              {statusLabel}
+            </p>
+            <Progress value={progress} className="h-1.5" />
+            <p className="text-xs text-zinc-600 dark:text-zinc-400">
+              {Math.round(progress)}% estimated progress
+            </p>
+            {prompt && (
+              <p className="line-clamp-2 text-xs text-zinc-500 dark:text-zinc-400">
+                {prompt}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -291,6 +333,8 @@ export function ImageEditGenerateToolView({
   project,
 }: ImageEditGenerateToolViewProps) {
   const {
+    prompt,
+    status,
     generatedImagePaths,
     generatedVideoPaths,
     isVideoMode,
@@ -325,7 +369,59 @@ export function ImageEditGenerateToolView({
     (!!error || (batchResults.length > 0 && !batchResults[0].success));
 
   const actualIsSuccess = hasMedia && !hasActualError;
+  const isLoadingState = (isStreaming || !toolResult || (!hasMedia && !hasActualError)) && !actualIsSuccess;
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [loadingElapsedMs, setLoadingElapsedMs] = useState(0);
+
+  React.useEffect(() => {
+    if (!isLoadingState) {
+      setLoadingElapsedMs(0);
+      return;
+    }
+
+    const startedAt = Date.now();
+    setLoadingElapsedMs(0);
+
+    const timer = setInterval(() => {
+      setLoadingElapsedMs(Date.now() - startedAt);
+    }, 300);
+
+    return () => clearInterval(timer);
+  }, [isLoadingState, toolCall?.tool_call_id]);
+
+  const loadingProgress = useMemo(() => {
+    if (!isLoadingState) {
+      return 100;
+    }
+
+    if (loadingElapsedMs < 1500) {
+      return 12 + (loadingElapsedMs / 1500) * 14;
+    }
+    if (loadingElapsedMs < 5000) {
+      return 26 + ((loadingElapsedMs - 1500) / 3500) * 28;
+    }
+    if (loadingElapsedMs < 9000) {
+      return 54 + ((loadingElapsedMs - 5000) / 4000) * 20;
+    }
+    return Math.min(92, 74 + ((loadingElapsedMs - 9000) / 6000) * 18);
+  }, [isLoadingState, loadingElapsedMs]);
+
+  const loadingStatusLabel = useMemo(() => {
+    if (status && typeof status === 'string' && status.trim()) {
+      return status.trim();
+    }
+
+    if (loadingElapsedMs < 1500) {
+      return 'Preparing media request';
+    }
+    if (loadingElapsedMs < 5000) {
+      return isVideoMode ? 'Generating video frames' : 'Generating image';
+    }
+    if (loadingElapsedMs < 9000) {
+      return isVideoMode ? 'Rendering final video' : 'Refining details';
+    }
+    return 'Finalizing output';
+  }, [status, loadingElapsedMs, isVideoMode]);
 
   // Get media blob URL for download
   const { data: mediaBlob } = useFileContentQuery(sandboxId, videoPath || imagePath, {
@@ -397,8 +493,12 @@ export function ImageEditGenerateToolView({
 
       <CardContent className="p-4">
         {isStreaming || !toolResult ? (
-          /* Streaming/Loading State - ALWAYS show shimmer when streaming or no result yet */
-          <ShimmerBox aspectVideo={isVideoMode} />
+          <MediaLoadingState
+            aspectVideo={isVideoMode}
+            progress={loadingProgress}
+            statusLabel={loadingStatusLabel}
+            prompt={prompt}
+          />
         ) : hasActualError ? (
           /* Error State - Only after streaming complete AND actual failure */
           <div className="flex flex-col items-center justify-center py-12 px-6 text-center">
@@ -419,8 +519,12 @@ export function ImageEditGenerateToolView({
           /* Success State - Show image */
           <ImageDisplay filePath={imagePath} sandboxId={sandboxId} />
         ) : (
-          /* Fallback shimmer if no media yet */
-          <ShimmerBox aspectVideo={isVideoMode} />
+          <MediaLoadingState
+            aspectVideo={isVideoMode}
+            progress={loadingProgress}
+            statusLabel={loadingStatusLabel}
+            prompt={prompt}
+          />
         )}
       </CardContent>
     </Card>

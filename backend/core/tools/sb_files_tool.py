@@ -11,8 +11,16 @@ import litellm
 import openai
 import asyncio
 import re
+from io import BytesIO
 from typing import Optional
 from datetime import datetime
+
+try:
+    from docx import Document
+    from docx.shared import Pt
+except ImportError:
+    Document = None
+    Pt = None
 
 @tool_metadata(
     display_name="Write & Edit",
@@ -205,6 +213,112 @@ class SandboxFilesTool(SandboxToolsBase):
 
         return None
 
+    def _append_markdown_runs(self, paragraph, text: str) -> None:
+        token_pattern = r"(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\)|\*[^*]+\*)"
+        for part in re.split(token_pattern, text):
+            if not part:
+                continue
+
+            if part.startswith("**") and part.endswith("**") and len(part) > 4:
+                run = paragraph.add_run(part[2:-2])
+                run.bold = True
+                continue
+
+            if part.startswith("*") and part.endswith("*") and len(part) > 2:
+                run = paragraph.add_run(part[1:-1])
+                run.italic = True
+                continue
+
+            if part.startswith("`") and part.endswith("`") and len(part) > 2:
+                run = paragraph.add_run(part[1:-1])
+                if Pt is not None:
+                    run.font.size = Pt(10)
+                run.font.name = "Courier New"
+                continue
+
+            link_match = re.fullmatch(r"\[([^\]]+)\]\(([^)]+)\)", part)
+            if link_match:
+                label, url = link_match.groups()
+                paragraph.add_run(label)
+                paragraph.add_run(f" ({url})")
+                continue
+
+            paragraph.add_run(part)
+
+    def _build_docx_bytes(self, file_contents: str) -> bytes:
+        if Document is None:
+            raise ValueError("python-docx is not installed on the backend")
+
+        doc = Document()
+        normal_style = doc.styles["Normal"]
+        normal_style.font.name = "Calibri"
+        if Pt is not None:
+            normal_style.font.size = Pt(11)
+
+        in_code_block = False
+        code_lines = []
+
+        def flush_code_block() -> None:
+            nonlocal code_lines
+            if not code_lines:
+                return
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run("\n".join(code_lines))
+            run.font.name = "Courier New"
+            if Pt is not None:
+                run.font.size = Pt(10)
+            code_lines = []
+
+        for raw_line in file_contents.splitlines():
+            stripped = raw_line.strip()
+
+            if stripped.startswith("```"):
+                if in_code_block:
+                    flush_code_block()
+                    in_code_block = False
+                else:
+                    in_code_block = True
+                continue
+
+            if in_code_block:
+                code_lines.append(raw_line.rstrip("\n"))
+                continue
+
+            if not stripped:
+                continue
+
+            heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            if heading_match:
+                flush_code_block()
+                level = min(len(heading_match.group(1)), 4)
+                doc.add_heading(heading_match.group(2).strip(), level=level)
+                continue
+
+            bullet_match = re.match(r"^[-*]\s+(.+)$", stripped)
+            if bullet_match:
+                flush_code_block()
+                paragraph = doc.add_paragraph(style="List Bullet")
+                self._append_markdown_runs(paragraph, bullet_match.group(1).strip())
+                continue
+
+            numbered_match = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+            if numbered_match:
+                flush_code_block()
+                paragraph = doc.add_paragraph(style="List Number")
+                self._append_markdown_runs(paragraph, numbered_match.group(1).strip())
+                continue
+
+            flush_code_block()
+            paragraph = doc.add_paragraph()
+            self._append_markdown_runs(paragraph, stripped)
+
+        flush_code_block()
+
+        buffer = BytesIO()
+        doc.save(buffer)
+        buffer.seek(0)
+        return buffer.getvalue()
+
     async def get_workspace_state(self) -> dict:
         """Get the current workspace state by reading all files"""
         files_state = {}
@@ -298,14 +412,27 @@ Usage:
             if isinstance(file_contents, dict):
                 file_contents = json.dumps(file_contents, indent=4)
 
+            cleaned_file_path = self.clean_path(file_path).lower()
+            blocked_binary_extensions = (".doc", ".ppt", ".pptx", ".xls", ".xlsx", ".pdf")
+
+            if cleaned_file_path.endswith(".docx"):
+                file_bytes = self._build_docx_bytes(file_contents)
+            else:
+                if cleaned_file_path.endswith(blocked_binary_extensions):
+                    return self.fail_response(
+                        "create_file only writes text content. Use a real export flow for Office/PDF files instead of writing plain text into a binary extension."
+                    )
+                file_bytes = file_contents.encode()
+
             # Write the file content
-            await self.sandbox.fs.upload_file(file_contents.encode(), full_path)
+            await self.sandbox.fs.upload_file(file_bytes, full_path)
             await self.sandbox.fs.set_file_permissions(full_path, permissions)
             await self._touch_presentation_metadata_if_slide(file_path)
             
             message = f"File '{file_path}' created successfully."
+            if cleaned_file_path.endswith(".docx"):
+                message = f"DOCX file '{file_path}' created successfully."
 
-            cleaned_file_path = self.clean_path(file_path).lower()
             is_presentation_html = cleaned_file_path.startswith('presentations/') and cleaned_file_path.endswith('.html')
             if file_path.lower().endswith('.html') and not is_presentation_html:
                 try:
