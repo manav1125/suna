@@ -786,7 +786,7 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
 
   const buildTemplateWorkflowInstruction = useCallback((templateId: string) => {
     const templateName = formatTemplateName(templateId);
-    return `Use the presentation template with exact id "${templateId}" (${templateName}). First call load_template_design with template_name="${templateId}" and a presentation_name. Then rewrite the copied slide HTML files with full_file_rewrite. Preserve the template styling and structure. Do not use create_slide for this template-based presentation.`;
+    return `Use the presentation template with exact id "${templateId}" (${templateName}). First call load_template_design with template_name="${templateId}" and a presentation_name. Then use populate_template_slide to replace visible text and image sources while preserving the copied template structure and styling. Use full_file_rewrite only if a full structural rewrite is truly necessary. Do not use create_slide for this template-based presentation.`;
   }, [formatTemplateName]);
 
   // Mode Starter handlers

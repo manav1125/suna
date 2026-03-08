@@ -9,6 +9,7 @@ FUNCTION_TO_TOOL_CLASS = {
     # Presentation tool methods
     'create_slide': 'sb_presentation_tool',
     'load_template_design': 'sb_presentation_tool',
+    'populate_template_slide': 'sb_presentation_tool',
     # Canvas tool methods
     'create_canvas': 'sb_canvas_tool',
     'add_canvas_element': 'sb_canvas_tool',

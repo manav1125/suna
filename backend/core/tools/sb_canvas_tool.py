@@ -99,7 +99,7 @@ class SandboxCanvasTool(SandboxToolsBase):
         """Ensure the canvases directory exists"""
         await self._ensure_sandbox()
         full_path = f"{self.workspace_path}/{self.canvases_dir}"
-        logger.debug(f"[Canvas] Creating directory: {full_path} in sandbox {self._sandbox_id}")
+        logger.debug(f"[Canvas] Creating directory: {full_path} in sandbox {self.sandbox_id}")
         try:
             result = await self.sandbox.process.exec(f"mkdir -p '{full_path}'")
             # Verify directory was created
@@ -251,7 +251,7 @@ class SandboxCanvasTool(SandboxToolsBase):
         """Create a new infinite canvas"""
         try:
             await self._ensure_sandbox()
-            logger.info(f"[Canvas] Creating canvas '{name}' in sandbox {self._sandbox_id} for project {self.project_id}")
+            logger.info(f"[Canvas] Creating canvas '{name}' in sandbox {self.sandbox_id} for project {self.project_id}")
             await self._ensure_canvases_dir()
             await self._ensure_images_dir()
 
@@ -1240,4 +1240,3 @@ class SandboxCanvasTool(SandboxToolsBase):
             
         except Exception as e:
             return self.fail_response(f"Failed to process canvas element: {str(e)}")
-

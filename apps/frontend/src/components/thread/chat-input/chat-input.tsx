@@ -1141,6 +1141,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
       return markdown;
     }, [selectedMode, selectedCharts, selectedOutputFormat]);
 
+    // Generate Markdown for slide workflow guardrails
+    const generateSlidesWorkflowMarkdown = useCallback(() => {
+      if (selectedMode !== 'slides') {
+        return '';
+      }
+
+      return [
+        '',
+        '',
+        '----',
+        '',
+        '**Presentation Quality Workflow (Required):**',
+        '- Do real research before building slides: batch web search, then create a slide outline with one strong idea per slide',
+        '- For custom slides, download topic-specific images into `presentations/images/` before calling create_slide',
+        '- Do not hotlink random public image URLs directly inside slide HTML; use local workspace image paths such as `../images/...`',
+        '- Every slide must have a clear fixed 1920x1080 presentation layout, not a webpage/card grid',
+        '- Do not finish until all slides are created and the deck is coherent end-to-end',
+      ].join('\n');
+    }, [selectedMode]);
+
     // Generate Markdown for selected slides template
     const generateSlidesTemplateMarkdown = useCallback(() => {
       if (selectedMode !== 'slides' || !selectedTemplate) {
@@ -1161,7 +1181,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
         `- Exact template id: ${selectedTemplate}`,
         `- Display name: ${templateDisplayName}`,
         `- First call load_template_design with template_name="${selectedTemplate}" and a presentation_name`,
-        '- Then rewrite the copied slide HTML files with full_file_rewrite',
+        '- Then use populate_template_slide to replace visible text and image sources on the copied slides',
+        '- Use full_file_rewrite only if you intentionally need a full structural rewrite',
         '- Preserve the template CSS and layout structure',
         '- Do not use create_slide for this template-based presentation',
       ].join('\n');
@@ -1233,6 +1254,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
         message = message + dataOptionsMarkdown;
       }
 
+      const slidesWorkflowMarkdown = generateSlidesWorkflowMarkdown();
+      if (slidesWorkflowMarkdown) {
+        message = message + slidesWorkflowMarkdown;
+      }
+
       // Append Markdown for slides template
       const slidesTemplateMarkdown = generateSlidesTemplateMarkdown();
       if (slidesTemplateMarkdown) {
@@ -1249,7 +1275,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
       });
 
       // Keep files visible with loading spinner - they'll be cleared when agent starts running
-    }, [loading, disabled, isAgentRunning, isUploading, onStopAgent, generateDataOptionsMarkdown, generateSlidesTemplateMarkdown, getActualModelId, selectedModel, onSubmit, selectedAgentId]);
+    }, [loading, disabled, isAgentRunning, isUploading, onStopAgent, generateDataOptionsMarkdown, generateSlidesWorkflowMarkdown, generateSlidesTemplateMarkdown, getActualModelId, selectedModel, onSubmit, selectedAgentId]);
 
     // Handle paste for image files
     const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {

@@ -4,6 +4,8 @@ from core.agentpress.thread_manager import ThreadManager
 from core.utils.logger import logger
 from core.services.http_client import get_http_client
 from typing import List, Dict, Optional, Union, TYPE_CHECKING
+from bs4 import BeautifulSoup, NavigableString
+from html import escape
 import json
 import os
 from datetime import datetime
@@ -25,15 +27,16 @@ if TYPE_CHECKING:
 ### PRESENTATION CREATION WORKFLOW
 
 **MANDATORY QUALITY GATES (DO NOT SKIP):**
-- If you call `load_template_design` with `presentation_name`, you MUST then call `full_file_rewrite` on the copied slide files before completing.
+- If you call `load_template_design` with `presentation_name`, you MUST then use `populate_template_slide` for the copied slides (or `full_file_rewrite` only if you are intentionally doing a full structural rewrite).
 - If you are using a built-in template, do NOT use `create_slide`; template workflows must stay in the copied template files.
 - Never finish right after template copy; template copy is setup only, not final output.
 - Every custom slide must include a clear visual structure (styled layout, chart/table/image/iconography), not plain text-only HTML.
-- If using `../images/...` paths, ensure those files actually exist first. If they do not, use direct HTTPS image URLs.
+- If using `../images/...` paths, ensure those files actually exist first.
+- For custom slides, do NOT hotlink public internet image URLs directly inside `<img src="">`. Download them into `presentations/images/` first or use generated workspace assets.
 
 **🚨 CRITICAL: This tool provides the create_slide function for presentations!**
 - **Use create_slide ONLY for custom-theme presentations**
-- **For template-based presentations, load the template with `presentation_name` and then use `full_file_rewrite`**
+- **For template-based presentations, load the template with `presentation_name` and then use `populate_template_slide`**
 - **NEVER** use generic create_file to create presentation slides
 - This tool is specialized for presentation creation with proper formatting, validation, and navigation
 
@@ -459,112 +462,393 @@ class SandboxPresentationTool(SandboxToolsBase):
             return (
                 "Slide content rejected because it relies on CSS classes without any accompanying styles. "
                 "This usually means template HTML was copied into create_slide. For template-based presentations, "
-                "call load_template_design with presentation_name and then rewrite the copied slide HTML files with "
-                "full_file_rewrite. For custom slides, include a <style> block or inline styles so the slide renders correctly."
+                "call load_template_design with presentation_name and then update the copied slides with "
+                "populate_template_slide. For custom slides, include a <style> block or inline styles so the slide renders correctly."
             )
 
         return None
 
+    def _validate_slide_assets(self, slide_content: str) -> Optional[str]:
+        soup = BeautifulSoup(slide_content or "", "html.parser")
+        disallowed_sources: List[str] = []
+
+        for image in soup.find_all("img"):
+            src = (image.get("src") or "").strip()
+            if not src:
+                continue
+
+            lowered = src.lower()
+            if lowered.startswith(("http://", "https://", "data:", "blob:")):
+                disallowed_sources.append(src)
+
+        if not disallowed_sources:
+            return None
+
+        preview = ", ".join(
+            f"{src[:80]}{'...' if len(src) > 80 else ''}"
+            for src in disallowed_sources[:2]
+        )
+
+        return (
+            "Slide content rejected because custom presentation slides must use workspace image assets, "
+            "not hotlinked public URLs. Download topic-specific images into presentations/images/ and "
+            "reference them via ../images/... or use generated workspace files first. "
+            f"Found external image source(s): {preview}"
+        )
+
+    def _should_auto_design_slide(self, slide_content: str) -> bool:
+        lowered = (slide_content or "").lower()
+        if "<style" in lowered:
+            return False
+
+        class_attr_count = len(re.findall(r"\bclass\s*=", slide_content, flags=re.IGNORECASE))
+        inline_style_count = len(re.findall(r"\bstyle\s*=", slide_content, flags=re.IGNORECASE))
+
+        if class_attr_count >= 3 or inline_style_count >= 6:
+            return False
+
+        tags = re.findall(r"<\s*/?\s*([a-z0-9-]+)", lowered)
+        if not tags:
+            return True
+
+        simple_tags = {
+            "article",
+            "aside",
+            "b",
+            "blockquote",
+            "br",
+            "div",
+            "em",
+            "footer",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "header",
+            "i",
+            "img",
+            "li",
+            "main",
+            "ol",
+            "p",
+            "section",
+            "small",
+            "span",
+            "strong",
+            "sub",
+            "sup",
+            "ul",
+        }
+        return all(tag in simple_tags for tag in tags)
+
+    def _dedupe_text_items(self, values: List[str]) -> List[str]:
+        seen = set()
+        deduped: List[str] = []
+        for value in values:
+            normalized = re.sub(r"\s+", " ", (value or "").strip())
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            deduped.append(normalized)
+        return deduped
+
+    def _extract_slide_semantics(self, slide_content: str, slide_title: str) -> Dict[str, object]:
+        soup = BeautifulSoup(slide_content or "", "html.parser")
+        for tag in soup.find_all(["style", "script", "noscript"]):
+            tag.decompose()
+
+        def clean_text(value: str) -> str:
+            return re.sub(r"\s+", " ", unquote(value or "")).strip()
+
+        headings = self._dedupe_text_items(
+            [clean_text(tag.get_text(" ", strip=True)) for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])]
+        )
+        paragraphs = self._dedupe_text_items(
+            [clean_text(tag.get_text(" ", strip=True)) for tag in soup.find_all("p")]
+        )
+        bullets = self._dedupe_text_items(
+            [clean_text(tag.get_text(" ", strip=True)) for tag in soup.find_all("li")]
+        )
+        quotes = self._dedupe_text_items(
+            [clean_text(tag.get_text(" ", strip=True)) for tag in soup.find_all("blockquote")]
+        )
+
+        images: List[Dict[str, str]] = []
+        seen_images = set()
+        for tag in soup.find_all("img"):
+            src = clean_text(tag.get("src", ""))
+            alt = clean_text(tag.get("alt", ""))
+            if not src:
+                continue
+            lowered = src.lower()
+            if lowered.startswith(("http://", "https://", "data:", "blob:")):
+                continue
+            if src in seen_images:
+                continue
+            seen_images.add(src)
+            images.append({"src": src, "alt": alt})
+
+        fallback_texts: List[str] = []
+        for node in soup.find_all(string=True):
+            if not isinstance(node, NavigableString):
+                continue
+            parent = node.parent
+            if parent and parent.name in {"style", "script", "title", "head"}:
+                continue
+
+            text = clean_text(str(node))
+            if not text or len(text) < 6:
+                continue
+
+            fallback_texts.append(text)
+
+        fallback_texts = self._dedupe_text_items(fallback_texts)
+        title_text = headings[0] if headings else clean_text(slide_title) or (fallback_texts[0] if fallback_texts else "Slide")
+
+        narrative_pool = self._dedupe_text_items(paragraphs + quotes + fallback_texts)
+        narrative_pool = [item for item in narrative_pool if item.lower() != title_text.lower()]
+
+        lead = narrative_pool[0] if narrative_pool else ""
+        supporting = [item for item in narrative_pool[1:] if item.lower() != lead.lower()][:3]
+
+        key_points = bullets[:4]
+        if not key_points:
+            key_points = [item for item in supporting[:4] if len(item) <= 180]
+
+        if not supporting and lead:
+            supporting = [lead]
+
+        kicker = ""
+        if len(headings) > 1:
+            kicker = headings[1]
+        elif slide_title and clean_text(slide_title).lower() != title_text.lower():
+            kicker = clean_text(slide_title)
+
+        return {
+            "title": title_text,
+            "kicker": kicker,
+            "lead": lead,
+            "supporting": supporting,
+            "key_points": key_points,
+            "image": images[0] if images else None,
+        }
+
     def _apply_visual_baseline(self, slide_content: str, slide_title: str) -> str:
-        """Wrap plain content in a branded visual shell so slides are never text-only placeholders."""
-        safe_title = (slide_title or "Slide").replace("<", "").replace(">", "")
+        """Auto-design simple slide fragments into a polished fixed-layout presentation slide."""
+        semantics = self._extract_slide_semantics(slide_content, slide_title)
+
+        title_text = escape(str(semantics.get("title") or slide_title or "Slide"))
+        kicker_text = escape(str(semantics.get("kicker") or ""))
+        lead_text = escape(str(semantics.get("lead") or ""))
+        supporting = [escape(item) for item in semantics.get("supporting", []) if item]
+        key_points = [escape(item) for item in semantics.get("key_points", []) if item]
+        image = semantics.get("image") if isinstance(semantics.get("image"), dict) else None
+        image_src = escape((image or {}).get("src", ""), quote=True) if image else ""
+        image_alt = escape((image or {}).get("alt", title_text), quote=True) if image else ""
+
+        insight_cards = "".join(
+            f"""
+            <div class="vv-insight-card">
+              <div class="vv-insight-index">{index:02d}</div>
+              <p>{point}</p>
+            </div>
+            """
+            for index, point in enumerate(key_points[:4], start=1)
+        )
+
+        supporting_cards = "".join(
+            f'<div class="vv-support-card"><p>{paragraph}</p></div>'
+            for paragraph in supporting[:2]
+        )
+
+        media_markup = ""
+        if image_src:
+            media_markup = f"""
+            <div class="vv-media-column">
+              <div class="vv-media-card">
+                <img src="{image_src}" alt="{image_alt or title_text}" />
+              </div>
+            </div>
+            """
+
         return f"""
 <style>
-  .kortix-visual-shell {{
+  .vv-auto-slide {{
     width: 1920px;
     height: 1080px;
     box-sizing: border-box;
     position: relative;
     overflow: hidden;
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 48%, #334155 100%);
+    background:
+      radial-gradient(circle at 12% 18%, rgba(34, 211, 238, 0.22), transparent 34%),
+      radial-gradient(circle at 88% 14%, rgba(168, 85, 247, 0.18), transparent 28%),
+      linear-gradient(135deg, #0f172a 0%, #111827 45%, #1e293b 100%);
     color: #f8fafc;
-    padding: 80px;
+    padding: 72px;
   }}
-  .kortix-visual-shell .decor-orb {{
-    position: absolute;
-    border-radius: 9999px;
-    filter: blur(4px);
-    opacity: 0.28;
+  .vv-auto-slide * {{
+    box-sizing: border-box;
   }}
-  .kortix-visual-shell .decor-orb.one {{
-    width: 420px;
-    height: 420px;
-    top: -140px;
-    right: -110px;
-    background: radial-gradient(circle at 30% 30%, #93c5fd, #3b82f6 70%);
-  }}
-  .kortix-visual-shell .decor-orb.two {{
-    width: 340px;
-    height: 340px;
-    left: -120px;
-    bottom: -90px;
-    background: radial-gradient(circle at 30% 30%, #67e8f9, #06b6d4 70%);
-  }}
-  .kortix-visual-shell .content-card {{
+  .vv-auto-slide .vv-frame {{
     position: relative;
     z-index: 2;
     width: 100%;
     height: 100%;
-    box-sizing: border-box;
-    border-radius: 28px;
-    border: 1px solid rgba(148, 163, 184, 0.32);
-    background: linear-gradient(160deg, rgba(15, 23, 42, 0.72), rgba(30, 41, 59, 0.72));
-    backdrop-filter: blur(6px);
-    padding: 56px 64px;
+    border-radius: 36px;
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    background: linear-gradient(160deg, rgba(15, 23, 42, 0.82), rgba(30, 41, 59, 0.78));
+    box-shadow: 0 30px 80px rgba(15, 23, 42, 0.32);
+    display: grid;
+    grid-template-columns: 1.12fr 0.88fr;
+    gap: 36px;
+    padding: 56px;
   }}
-  .kortix-visual-shell .eyebrow {{
-    font-size: 18px;
-    letter-spacing: 0.16em;
+  .vv-auto-slide.no-media .vv-frame {{
+    grid-template-columns: 1fr;
+  }}
+  .vv-auto-slide .vv-decor {{
+    position: absolute;
+    border-radius: 9999px;
+    filter: blur(6px);
+    opacity: 0.3;
+  }}
+  .vv-auto-slide .vv-decor.one {{
+    width: 360px;
+    height: 360px;
+    top: -110px;
+    right: -90px;
+    background: radial-gradient(circle at 30% 30%, rgba(96, 165, 250, 0.9), rgba(59, 130, 246, 0.15) 72%);
+  }}
+  .vv-auto-slide .vv-decor.two {{
+    width: 320px;
+    height: 320px;
+    left: -90px;
+    bottom: -80px;
+    background: radial-gradient(circle at 30% 30%, rgba(52, 211, 153, 0.85), rgba(16, 185, 129, 0.12) 72%);
+  }}
+  .vv-auto-slide .vv-copy-column {{
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 24px;
+  }}
+  .vv-auto-slide .vv-kicker {{
+    margin: 0;
+    font-size: 16px;
+    line-height: 1.2;
+    letter-spacing: 0.2em;
     text-transform: uppercase;
-    color: #93c5fd;
-    margin: 0 0 20px 0;
+    color: #7dd3fc;
     font-weight: 700;
   }}
-  .kortix-visual-shell .auto-content h1,
-  .kortix-visual-shell .auto-content h2 {{
-    margin: 0 0 18px 0;
-    font-size: 64px;
-    line-height: 1.1;
+  .vv-auto-slide h1 {{
+    margin: 0;
+    font-size: 72px;
+    line-height: 0.98;
+    letter-spacing: -0.04em;
     color: #f8fafc;
+    font-weight: 800;
+    max-width: 900px;
   }}
-  .kortix-visual-shell .auto-content h3,
-  .kortix-visual-shell .auto-content h4 {{
-    margin: 0 0 14px 0;
-    font-size: 40px;
-    line-height: 1.2;
+  .vv-auto-slide .vv-lead {{
+    margin: 0;
+    max-width: 820px;
+    font-size: 28px;
+    line-height: 1.45;
+    color: #dbeafe;
+    font-weight: 500;
+  }}
+  .vv-auto-slide .vv-insights {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    margin-top: 10px;
+  }}
+  .vv-auto-slide .vv-insight-card,
+  .vv-auto-slide .vv-support-card {{
+    position: relative;
+    min-height: 150px;
+    padding: 22px 22px 24px;
+    border-radius: 24px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(148, 163, 184, 0.08));
+    backdrop-filter: blur(10px);
+  }}
+  .vv-auto-slide .vv-insight-index {{
+    font-size: 14px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #93c5fd;
+    margin-bottom: 12px;
+    font-weight: 700;
+  }}
+  .vv-auto-slide .vv-insight-card p,
+  .vv-auto-slide .vv-support-card p {{
+    margin: 0;
+    font-size: 23px;
+    line-height: 1.45;
     color: #e2e8f0;
   }}
-  .kortix-visual-shell .auto-content p,
-  .kortix-visual-shell .auto-content li {{
-    font-size: 32px;
-    line-height: 1.45;
-    color: #cbd5e1;
+  .vv-auto-slide .vv-support-grid {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
   }}
-  .kortix-visual-shell .auto-content ul,
-  .kortix-visual-shell .auto-content ol {{
-    margin: 14px 0 0 24px;
-    padding-left: 24px;
+  .vv-auto-slide .vv-media-column {{
+    min-width: 0;
+    display: flex;
+    align-items: stretch;
   }}
-  .kortix-visual-shell .accent-line {{
+  .vv-auto-slide .vv-media-card {{
+    width: 100%;
+    min-height: 100%;
+    border-radius: 30px;
+    overflow: hidden;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    background:
+      linear-gradient(180deg, rgba(30, 41, 59, 0.66), rgba(15, 23, 42, 0.92)),
+      linear-gradient(135deg, rgba(34, 211, 238, 0.18), rgba(168, 85, 247, 0.16));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+  }}
+  .vv-auto-slide .vv-media-card img {{
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 22px;
+  }}
+  .vv-auto-slide .vv-footer-bar {{
     position: absolute;
-    left: 64px;
-    right: 64px;
-    bottom: 44px;
-    height: 8px;
+    left: 56px;
+    right: 56px;
+    bottom: 36px;
+    height: 6px;
     border-radius: 9999px;
-    background: linear-gradient(90deg, #22d3ee, #38bdf8, #a78bfa);
-    opacity: 0.8;
+    background: linear-gradient(90deg, #22d3ee, #38bdf8, #34d399);
+    opacity: 0.9;
   }}
 </style>
-<div class="kortix-visual-shell">
-  <div class="decor-orb one"></div>
-  <div class="decor-orb two"></div>
-  <div class="content-card">
-    <p class="eyebrow">{safe_title}</p>
-    <div class="auto-content">
-      {slide_content}
+<div class="vv-auto-slide {'with-media' if image_src else 'no-media'}">
+  <div class="vv-decor one"></div>
+  <div class="vv-decor two"></div>
+  <div class="vv-frame">
+    <div class="vv-copy-column">
+      <p class="vv-kicker">{kicker_text or 'Research-backed narrative'}</p>
+      <h1>{title_text}</h1>
+      <p class="vv-lead">{lead_text or title_text}</p>
+      {'<div class="vv-insights">' + insight_cards + '</div>' if insight_cards else ''}
+      {'<div class="vv-support-grid">' + supporting_cards + '</div>' if supporting_cards else ''}
     </div>
-    <div class="accent-line"></div>
+    {media_markup}
+    <div class="vv-footer-bar"></div>
   </div>
 </div>
 """
@@ -821,7 +1105,7 @@ class SandboxPresentationTool(SandboxToolsBase):
         "type": "function",
         "function": {
             "name": "load_template_design",
-            "description": "Load complete design reference from a presentation template including all slide HTML and extracted style patterns (colors, fonts, layouts). If presentation_name is provided, the entire template will be copied to /workspace/presentations/{presentation_name}/ so you can edit ONLY the text content using full_file_rewrite - you MUST preserve 100% of the CSS styling, colors, fonts, and HTML structure. The visual design must remain identical; only text/data should change. Otherwise, use this template as DESIGN INSPIRATION ONLY - study the visual styling, CSS patterns, and layout structure to create your own original slides with similar aesthetics but completely different content.",
+            "description": "Load complete design reference from a presentation template including all slide HTML and extracted style patterns (colors, fonts, layouts). If presentation_name is provided, the entire template will be copied to /workspace/presentations/{presentation_name}/ so you can preserve the template and then update visible text/image content with populate_template_slide. The visual design must remain identical; only text/data/image sources should change. Otherwise, use this template as DESIGN INSPIRATION ONLY - study the visual styling, CSS patterns, and layout structure to create your own original slides with similar aesthetics but completely different content.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -919,17 +1203,18 @@ class SandboxPresentationTool(SandboxToolsBase):
                 response_data["presentation_name"] = safe_name
                 response_data["copied_to_workspace"] = True
                 response_data["requires_follow_up_edit"] = True
-                response_data["required_next_tool"] = "full_file_rewrite"
-                response_data["note"] = f"Template copied to /workspace/{self.presentations_dir}/{safe_name}/. **CRITICAL**: Use full_file_rewrite to edit slides. ONLY change text content - preserve ALL CSS, styling, colors, fonts, and HTML structure 100% exactly. The template's visual design must remain identical. This template provides ALL slides and extracted design patterns in one response."
+                response_data["required_next_tool"] = "populate_template_slide"
+                response_data["note"] = f"Template copied to /workspace/{self.presentations_dir}/{safe_name}/. **CRITICAL**: Prefer populate_template_slide to replace visible text and image sources while preserving the template DOM/CSS. Use full_file_rewrite only if you intentionally need a full structural rewrite. The template's visual design must remain identical."
                 response_data["usage_instructions"] = {
-                    "purpose": "TEMPLATE COPIED TO WORKSPACE - Edit ONLY the content, preserve ALL design/styling",
+                    "purpose": "TEMPLATE COPIED TO WORKSPACE - Replace only content, preserve ALL design/styling",
                     "do": [
-                        "Use full_file_rewrite tool to edit the copied slide HTML files",
+                        "Use populate_template_slide to replace visible text strings and image sources on the copied slides",
                         "ONLY modify text content inside HTML elements (headings, paragraphs, list items, data values)",
                         "Replace placeholder/example data with actual presentation content",
                         "Keep ALL <img>, <svg>, icon elements - only update src/alt attributes to point to your images",
                         "Keep the exact same number and type of elements (if template has 3 logo images, keep 3 <img> tags)",
-                        "Preserve the content structure - if it's a list, keep it a list; if it's images, keep images"
+                        "Preserve the content structure - if it's a list, keep it a list; if it's images, keep images",
+                        "Use full_file_rewrite only as a fallback when a full slide rewrite is truly necessary"
                     ],
                     "dont": [
                         "NEVER modify <style> blocks or CSS styling - preserve them 100% exactly as-is",
@@ -967,12 +1252,279 @@ class SandboxPresentationTool(SandboxToolsBase):
         except Exception as e:
             return self.fail_response(f"Failed to load template design: {str(e)}")
 
+    def _replace_template_text(self, soup: BeautifulSoup, find_text: str, replace_with: str, replace_all: bool = False) -> int:
+        if not find_text:
+            return 0
+
+        replacements = 0
+        needle = find_text.strip()
+
+        for node in soup.find_all(string=True):
+            if not isinstance(node, NavigableString):
+                continue
+
+            parent = node.parent
+            if parent and parent.name in {"script", "style", "title", "head"}:
+                continue
+
+            original = str(node)
+            original_stripped = original.strip()
+            if not original_stripped:
+                continue
+
+            updated = None
+            if needle in original:
+                updated = original.replace(needle, replace_with, -1 if replace_all else 1)
+            elif original_stripped == needle:
+                updated = replace_with
+
+            if updated is None or updated == original:
+                continue
+
+            node.replace_with(updated)
+            replacements += 1
+            if not replace_all:
+                break
+
+        return replacements
+
+    def _replace_template_image(self, soup: BeautifulSoup, replacement: Dict[str, str]) -> int:
+        find_src = (replacement.get("find_src") or "").strip()
+        find_alt = (replacement.get("find_alt") or "").strip().lower()
+        replace_with = (replacement.get("replace_with") or "").strip()
+        alt_text = (replacement.get("alt") or "").strip()
+
+        if not replace_with:
+            return 0
+
+        applied = 0
+        images = soup.find_all("img")
+        for image in images:
+            current_src = (image.get("src") or "").strip()
+            current_alt = (image.get("alt") or "").strip().lower()
+
+            matches = False
+            if find_src and current_src == find_src:
+                matches = True
+            elif find_alt and find_alt in current_alt:
+                matches = True
+            elif not find_src and not find_alt and len(images) == 1:
+                matches = True
+
+            if not matches:
+                continue
+
+            image["src"] = replace_with
+            if alt_text:
+                image["alt"] = alt_text
+            applied += 1
+            break
+
+        return applied
+
+    @openapi_schema({
+        "type": "function",
+        "function": {
+            "name": "populate_template_slide",
+            "description": "Safely replace visible text and image sources inside a copied template slide while preserving the template DOM, CSS, classes, layout, and visual styling. Use this after load_template_design with presentation_name. **WHEN TO USE**: Preferred tool for template-based presentations. **WHEN TO SKIP**: Do not use for custom-theme decks - use create_slide instead. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `presentation_name` (REQUIRED), `slide_number` (REQUIRED), `slide_title` (REQUIRED), `text_replacements` (optional), `image_replacements` (optional), `presentation_title` (optional).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "presentation_name": {
+                        "type": "string",
+                        "description": "Name of the copied presentation folder created by load_template_design."
+                    },
+                    "slide_number": {
+                        "type": "integer",
+                        "description": "Slide number to update inside the copied template deck."
+                    },
+                    "slide_title": {
+                        "type": "string",
+                        "description": "Human-friendly title for this slide. Used for presentation metadata."
+                    },
+                    "text_replacements": {
+                        "type": "array",
+                        "description": "List of exact visible text replacements to apply. Use strings that already exist in the copied template slide and replace them with researched content.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "find_text": {
+                                    "type": "string",
+                                    "description": "Exact visible text currently present in the template slide."
+                                },
+                                "replace_with": {
+                                    "type": "string",
+                                    "description": "New researched content to display in place of the existing text."
+                                },
+                                "replace_all": {
+                                    "type": "boolean",
+                                    "description": "Optional. Replace every matching occurrence instead of only the first.",
+                                    "default": False
+                                }
+                            },
+                            "required": ["find_text", "replace_with"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "image_replacements": {
+                        "type": "array",
+                        "description": "Optional list of image source replacements. Match by find_src or find_alt and replace with a workspace image path such as ../images/slide1.jpg.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "find_src": {
+                                    "type": "string",
+                                    "description": "Optional exact image src currently present in the template slide."
+                                },
+                                "find_alt": {
+                                    "type": "string",
+                                    "description": "Optional alt text fragment to identify the image when src is not convenient."
+                                },
+                                "replace_with": {
+                                    "type": "string",
+                                    "description": "New image path to use. Prefer workspace-relative paths such as ../images/brand-hero.jpg."
+                                },
+                                "alt": {
+                                    "type": "string",
+                                    "description": "Optional replacement alt text."
+                                }
+                            },
+                            "required": ["replace_with"],
+                            "additionalProperties": False
+                        }
+                    },
+                    "presentation_title": {
+                        "type": "string",
+                        "description": "Optional overall title for the full presentation deck."
+                    }
+                },
+                "required": ["presentation_name", "slide_number", "slide_title"],
+                "additionalProperties": False
+            }
+        }
+    })
+    async def populate_template_slide(
+        self,
+        presentation_name: str,
+        slide_number: int,
+        slide_title: str,
+        text_replacements: Optional[List[Dict[str, Union[str, bool]]]] = None,
+        image_replacements: Optional[List[Dict[str, str]]] = None,
+        presentation_title: Optional[str] = None,
+    ) -> ToolResult:
+        try:
+            await self._ensure_sandbox()
+            await self._ensure_presentations_dir()
+
+            if not presentation_name:
+                return self.fail_response("Presentation name is required.")
+
+            if slide_number is None:
+                return self.fail_response("Slide number is required.")
+
+            try:
+                slide_number = int(slide_number)
+            except (TypeError, ValueError):
+                return self.fail_response(f"Slide number must be an integer, got: {type(slide_number).__name__}")
+
+            if slide_number < 1:
+                return self.fail_response("Slide number must be 1 or greater.")
+
+            if not slide_title:
+                return self.fail_response("Slide title is required.")
+
+            if not text_replacements and not image_replacements:
+                return self.fail_response("At least one text or image replacement is required.")
+
+            safe_name, presentation_path = await self._ensure_presentation_dir(presentation_name)
+            slide_filename = f"slide_{slide_number:02d}.html"
+            slide_path = f"{presentation_path}/{slide_filename}"
+
+            try:
+                existing_html_raw = await self.sandbox.fs.download_file(slide_path)
+            except Exception as exc:
+                return self.fail_response(f"Template slide not found: {slide_filename} ({exc})")
+
+            existing_html = existing_html_raw.decode() if isinstance(existing_html_raw, bytes) else str(existing_html_raw)
+            soup = BeautifulSoup(existing_html, "html.parser")
+
+            text_updates_applied = 0
+            unmatched_text = []
+            for replacement in text_replacements or []:
+                find_text = str(replacement.get("find_text") or "").strip()
+                replace_with = str(replacement.get("replace_with") or "").strip()
+                replace_all = bool(replacement.get("replace_all", False))
+
+                applied = self._replace_template_text(soup, find_text, replace_with, replace_all=replace_all)
+                if applied == 0:
+                    unmatched_text.append(find_text)
+                text_updates_applied += applied
+
+            image_updates_applied = 0
+            unmatched_images = []
+            for replacement in image_replacements or []:
+                applied = self._replace_template_image(soup, replacement)
+                if applied == 0:
+                    unmatched_images.append(replacement.get("find_src") or replacement.get("find_alt") or "(first image)")
+                image_updates_applied += applied
+
+            if unmatched_text or unmatched_images:
+                details: List[str] = []
+                if unmatched_text:
+                    details.append(f"unmatched text: {', '.join(unmatched_text[:4])}")
+                if unmatched_images:
+                    details.append(f"unmatched images: {', '.join(str(item) for item in unmatched_images[:4])}")
+                return self.fail_response(
+                    "Failed to populate template slide because some requested replacements did not match the copied slide. "
+                    + "; ".join(details)
+                )
+
+            if soup.title:
+                deck_title = presentation_title or presentation_name
+                soup.title.string = f"{deck_title} - Slide {slide_number}"
+
+            updated_html = str(soup)
+            await self.sandbox.fs.upload_file(updated_html.encode(), slide_path)
+
+            presentation_lock = await self._get_metadata_lock(presentation_path)
+            async with presentation_lock:
+                metadata = await self._load_presentation_metadata(presentation_path)
+                metadata["presentation_name"] = presentation_name
+                if presentation_title:
+                    metadata["title"] = presentation_title
+                if "slides" not in metadata:
+                    metadata["slides"] = {}
+                metadata["slides"][str(slide_number)] = {
+                    "title": slide_title,
+                    "filename": slide_filename,
+                    "file_path": f"{self.presentations_dir}/{safe_name}/{slide_filename}",
+                    "preview_url": f"/workspace/{self.presentations_dir}/{safe_name}/{slide_filename}",
+                    "created_at": metadata.get("slides", {}).get(str(slide_number), {}).get("created_at", datetime.now().isoformat()),
+                }
+                await self._save_presentation_metadata(presentation_path, metadata)
+
+            return self.success_response({
+                "message": f"Template slide {slide_number} populated successfully",
+                "presentation_name": presentation_name,
+                "presentation_path": f"{self.presentations_dir}/{safe_name}",
+                "slide_number": slide_number,
+                "slide_title": slide_title,
+                "slide_file": f"{self.presentations_dir}/{safe_name}/{slide_filename}",
+                "preview_url": f"/workspace/{self.presentations_dir}/{safe_name}/{slide_filename}",
+                "text_updates_applied": text_updates_applied,
+                "image_updates_applied": image_updates_applied,
+                "note": "Template structure preserved while visible content was replaced"
+            })
+
+        except Exception as e:
+            return self.fail_response(f"Failed to populate template slide: {str(e)}")
+
 
     @openapi_schema({
         "type": "function",
         "function": {
             "name": "create_slide",
-            "description": "Create or update a single slide in a presentation. **WHEN TO USE**: This tool is ONLY for custom theme presentations (when no template is selected). **WHEN TO SKIP**: Do NOT use this tool for template-based presentations - use full_file_rewrite instead to rewrite existing template slide files. **PARALLEL EXECUTION**: This function supports parallel execution - create ALL slides simultaneously by using create_slide multiple times in parallel for much faster completion. Each slide is saved as a standalone HTML file with 1920x1080 dimensions (16:9 aspect ratio). Slides are automatically validated to ensure both width (≤1920px) and height (≤1080px) limits are met. Use `box-sizing: border-box` on containers with padding to prevent dimension overflow. **CRITICAL**: For custom theme presentations, you MUST have completed Phase 3 (research, content outline, image search, and ALL image downloads) before using this tool. All styling MUST be derived from the custom color scheme and design elements defined in Phase 2. **PRESENTATION DESIGN NOT WEBSITE**: Use fixed pixel dimensions, absolute positioning, and fixed layouts - NO responsive design patterns. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `presentation_name` (REQUIRED), `slide_number` (REQUIRED), `slide_title` (REQUIRED), `content` (REQUIRED), `presentation_title` (optional). **❌ DO NOT USE**: `file_path` - this parameter does NOT exist!",
+            "description": "Create or update a single slide in a presentation. **WHEN TO USE**: This tool is ONLY for custom theme presentations (when no template is selected). **WHEN TO SKIP**: Do NOT use this tool for template-based presentations - use populate_template_slide on copied template files instead. **PARALLEL EXECUTION**: This function supports parallel execution - create ALL slides simultaneously by using create_slide multiple times in parallel for much faster completion. Each slide is saved as a standalone HTML file with 1920x1080 dimensions (16:9 aspect ratio). Slides are automatically validated to ensure both width (≤1920px) and height (≤1080px) limits are met. Use `box-sizing: border-box` on containers with padding to prevent dimension overflow. **CRITICAL**: For custom theme presentations, you MUST have completed Phase 3 (research, content outline, image search, and ALL image downloads) before using this tool. All styling MUST be derived from the custom color scheme and design elements defined in Phase 2. **IMAGE RULE**: Do not hotlink public internet image URLs directly in slide HTML - download them into presentations/images/ first. **PRESENTATION DESIGN NOT WEBSITE**: Use fixed pixel dimensions, absolute positioning, and fixed layouts - NO responsive design patterns. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `presentation_name` (REQUIRED), `slide_number` (REQUIRED), `slide_title` (REQUIRED), `content` (REQUIRED), `presentation_title` (optional). **❌ DO NOT USE**: `file_path` - this parameter does NOT exist!",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1100,7 +1652,6 @@ class SandboxPresentationTool(SandboxToolsBase):
         presentation_title: str = "Presentation",
         **kwargs
     ) -> ToolResult:
-        print(f"[create_slide] ENTERED FUNCTION - presentation_name={repr(presentation_name)}, slide_number={repr(slide_number)}")
         logger.info(f"[create_slide] Received params: presentation_name={repr(presentation_name)}, "
                     f"slide_number={repr(slide_number)}, slide_title={repr(slide_title)[:50] if slide_title else repr(slide_title)}, "
                     f"content_length={len(content) if content else 0}, kwargs={list(kwargs.keys())}")
@@ -1137,13 +1688,17 @@ class SandboxPresentationTool(SandboxToolsBase):
             workflow_error = self._validate_slide_content_workflow(content)
             if workflow_error:
                 return self.fail_response(workflow_error)
+
+            asset_error = self._validate_slide_assets(content)
+            if asset_error:
+                return self.fail_response(asset_error)
             
             # Ensure presentation directory exists
             safe_name, presentation_path = await self._ensure_presentation_dir(presentation_name)
             
-            # Auto-apply a visual shell when the model returns plain, text-only slide fragments.
+            # Auto-apply a curated visual shell when the model returns low-structure slide fragments.
             final_content = content
-            if self._is_plain_slide_content(content):
+            if self._is_plain_slide_content(content) or self._should_auto_design_slide(content):
                 final_content = self._apply_visual_baseline(content, slide_title)
 
             # Parallel create_slide calls can race and overwrite metadata.
