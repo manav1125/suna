@@ -6,19 +6,18 @@ import { KnowledgeBaseManager } from './knowledge-base-manager';
 
 export function KnowledgeBasePage() {
     return (
-        <div>
-            <div className="min-h-screen">
-                <div className="container mx-auto max-w-7xl px-4 py-8">
-                    <KnowledgeBasePageHeader />
-                </div>
-                <div className="container mx-auto max-w-7xl px-4 py-2">
-                    <div className="w-full min-h-[calc(100vh-300px)]">
-                        <KnowledgeBaseManager
-                            showHeader={true}
-                            showRecentFiles={false}
-                            enableAssignments={false}
-                        />
-                    </div>
+        <div className="container mx-auto max-w-7xl px-3 sm:px-4 py-4 sm:py-8">
+            <div className="space-y-4 sm:space-y-8">
+                <KnowledgeBasePageHeader />
+                <div className="w-full">
+                    <KnowledgeBaseManager
+                        showHeader={true}
+                        headerTitle="Library"
+                        headerDescription="Upload documents once, organize them into folders, then assign the right files to each worker from its Knowledge tab."
+                        showRecentFiles={false}
+                        enableAssignments={false}
+                        emptyStateMessage="Start by adding files to your shared knowledge library. You can assign them to individual workers from each worker's Knowledge tab."
+                    />
                 </div>
             </div>
         </div>

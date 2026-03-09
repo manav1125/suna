@@ -148,9 +148,6 @@ export function UserSettingsModal({
     const handleTabClick = (tabId: TabId) => {
         if (tabId === 'plan') {
             setShowPlanModal(true);
-        } else if (tabId === 'knowledge-base') {
-            // Show Coming Soon tab instead of navigating
-            setActiveTab('knowledge-base');
         } else if (tabId === 'integrations') {
             onOpenChange(false);
             router.push('/settings/credentials');
@@ -1341,4 +1338,3 @@ function EnvManagerTab() {
         </div>
     );
 }
-
