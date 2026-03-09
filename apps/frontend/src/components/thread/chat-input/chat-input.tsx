@@ -1156,11 +1156,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
         '- Do real research before building slides: batch web search, then create a slide outline with one strong idea per slide',
         '- For each slide, pass create_slide a research-backed brief with: a clear thesis, 3-5 evidence bullets, 1-3 hard facts or metrics, and a visual brief tied to the topic',
         '- Never pass generic instruction copy such as "Highlight key metrics", "Example:", "This slide should", or other filler text as the actual slide content',
-        '- For slide visuals, prefer strong local assets or let create_slide generate a premium slide visual; avoid weak placeholder imagery',
+        '- For slide visuals, prefer strong local assets or let create_slide generate a premium supporting visual; avoid weak placeholder imagery',
+        '- If the user asks for no images or says the images did not show up, revise the slides with create_slide or list_slides and keep the request inside presentation tools only',
         '- Never keep placeholder labels or filler copy such as template names, example slide titles, lorem ipsum, or random unrelated brand names',
         '- For custom slides, download topic-specific images into `presentations/images/` before calling create_slide',
         '- Do not hotlink random public image URLs directly inside slide HTML; use local workspace image paths such as `../images/...`',
         '- Every slide must have a clear fixed 1920x1080 presentation layout, not a webpage/card grid',
+        '- Do not use canvas tools to revise or debug presentation slides; presentations stay in create_slide, load_template_design, populate_template_slide, and list_slides',
         '- Do not finish until all slides are created and the deck is coherent end-to-end',
       ].join('\n');
     }, [selectedMode]);
@@ -1185,11 +1187,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
         `- Exact template id: ${selectedTemplate}`,
         `- Display name: ${templateDisplayName}`,
         `- First call load_template_design with template_name="${selectedTemplate}" and a presentation_name`,
-        '- Treat the template as a visual theme initializer only; the real deck content must still be created from research',
-        '- Then use create_slide to create each real slide while inheriting the initialized template design system and assets',
+        '- The template defines the slide framework/layout; preserve that structure while replacing the placeholder content with researched material',
+        '- Then use create_slide to create each real slide while inheriting the initialized template framework, design system, and copied assets',
         '- Each template-based slide still needs a research-backed brief: thesis, evidence bullets, metrics/facts, and a visual brief',
-        '- Treat the template as a visual theme initializer, not as literal placeholder HTML to repair in place',
+        '- If the user asks for no images, create or revise the slide without visuals instead of switching to canvas tools',
         '- Use populate_template_slide only if you explicitly need exact DOM-preserving edits',
+        '- Do not use canvas tools to modify presentation slides',
         '- Keep the deck research-backed and visually strong from start to finish',
       ].join('\n');
     }, [selectedMode, selectedTemplate]);

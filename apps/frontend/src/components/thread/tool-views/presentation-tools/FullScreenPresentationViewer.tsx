@@ -21,6 +21,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { CodeEditor } from '@/components/file-editors/code-editor';
 import { constructHtmlPreviewUrl, withQueryParam } from '@/lib/utils/url';
 import { downloadPresentation, DownloadFormat, handleGoogleSlidesUpload, fetchPresentationMetadata, sanitizePresentationName } from '../utils/presentation-utils';
 import { useDownloadRestriction } from '@/hooks/billing';
@@ -69,9 +70,14 @@ export function FullScreenPresentationViewer({
   const hasLoadedRef = useRef(false);
   const [showControls, setShowControls] = useState(true);
   const [showEditor, setShowEditor] = useState(false);
+  const [editorContent, setEditorContent] = useState('');
+  const [editorOriginalContent, setEditorOriginalContent] = useState('');
+  const [isEditorLoading, setIsEditorLoading] = useState(false);
+  const [editorError, setEditorError] = useState<string | null>(null);
   const [isDownloadingPDF, setIsDownloadingPDF] = useState(false);
   const [isDownloadingPPTX, setIsDownloadingPPTX] = useState(false);
   const [isDownloadingGoogleSlides, setIsDownloadingGoogleSlides] = useState(false);
+  const [editorRefreshNonce, setEditorRefreshNonce] = useState(0);
 
   // Track the previous isOpen state to detect when modal opens
   const wasOpenRef = useRef(false);
@@ -83,7 +89,10 @@ export function FullScreenPresentationViewer({
   const { session } = useAuth();
 
   // Create a stable refresh timestamp when metadata changes (like PresentationViewer)
-  const refreshTimestamp = useMemo(() => metadata?.updated_at || Date.now(), [metadata?.updated_at]);
+  const refreshTimestamp = useMemo(
+    () => `${metadata?.updated_at || 'initial'}-${editorRefreshNonce}`,
+    [metadata?.updated_at, editorRefreshNonce],
+  );
 
   const slides = metadata ? Object.entries(metadata.slides)
     .map(([num, slide]) => ({ number: parseInt(num), ...slide }))
@@ -235,6 +244,14 @@ export function FullScreenPresentationViewer({
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (showEditor) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          setShowEditor(false);
+        }
+        return;
+      }
 
       // Prevent default for all our handled keys
       const handledKeys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' ', 'Home', 'End', 'Escape'];
@@ -317,6 +334,102 @@ export function FullScreenPresentationViewer({
   };
 
   const currentSlideData = slides.find(slide => slide.number === currentSlide);
+  const currentSlideWorkspacePath = useMemo(() => {
+    if (!currentSlideData?.file_path) return null;
+    if (currentSlideData.file_path.startsWith('/workspace/')) {
+      return currentSlideData.file_path;
+    }
+    return `/workspace/${currentSlideData.file_path.replace(/^\/+/, '')}`;
+  }, [currentSlideData?.file_path]);
+
+  useEffect(() => {
+    if (!showEditor) {
+      setIsEditorLoading(false);
+      setEditorError(null);
+      return;
+    }
+
+    if (!sandboxId || !currentSlideWorkspacePath) {
+      setIsEditorLoading(false);
+      setEditorError('Missing sandbox or slide path for editing.');
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const loadEditorContent = async () => {
+      try {
+        setIsEditorLoading(true);
+        setEditorError(null);
+
+        const response = await fetch(
+          `${process.env.NEXT_PUBLIC_BACKEND_URL}/sandboxes/${sandboxId}/files/content?path=${encodeURIComponent(currentSlideWorkspacePath)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${session?.access_token}`,
+            },
+            signal: controller.signal,
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(await response.text() || 'Failed to load slide source');
+        }
+
+        const text = await response.text();
+        if (cancelled) return;
+        setEditorContent(text);
+        setEditorOriginalContent(text);
+      } catch (error) {
+        if (cancelled || controller.signal.aborted) return;
+        setEditorError(error instanceof Error ? error.message : 'Failed to load slide source');
+      } finally {
+        if (!cancelled) {
+          setIsEditorLoading(false);
+        }
+      }
+    };
+
+    loadEditorContent();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [showEditor, sandboxId, currentSlideWorkspacePath, session?.access_token]);
+
+  const handleSaveEditorContent = useCallback(async (nextContent: string) => {
+    if (!sandboxId || !currentSlideWorkspacePath) {
+      throw new Error('Missing sandbox or slide path');
+    }
+
+    const response = await fetch(
+      `${process.env.NEXT_PUBLIC_BACKEND_URL}/sandboxes/${sandboxId}/files`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${session?.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          path: currentSlideWorkspacePath,
+          content: nextContent,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(await response.text() || 'Failed to save slide source');
+    }
+
+    setEditorContent(nextContent);
+    setEditorOriginalContent(nextContent);
+    setEditorError(null);
+    setEditorRefreshNonce(Date.now());
+    hasLoadedRef.current = false;
+    await loadMetadata(0, 5);
+  }, [sandboxId, currentSlideWorkspacePath, session?.access_token, loadMetadata]);
 
   // Memoized slide iframe component with proper scaling (matching PresentationViewer)
   const SlideIframe = useMemo(() => {
@@ -411,8 +524,8 @@ export function FullScreenPresentationViewer({
             }}
           >
             <iframe
-              key={`slide-${slide.number}-${refreshTimestamp}-${showEditor}`} // Key with stable timestamp ensures iframe refreshes when metadata changes
-              src={showEditor ? `${sandboxUrl}/api/html/${slide.file_path}/editor` : slideUrlWithCacheBust}
+              key={`slide-${slide.number}-${refreshTimestamp}`} // Key with stable timestamp ensures iframe refreshes when metadata changes
+              src={slideUrlWithCacheBust}
               title={`Slide ${slide.number}: ${slide.title}`}
               className="border-0 rounded-xl"
               sandbox="allow-same-origin allow-scripts allow-modals"
@@ -447,7 +560,7 @@ export function FullScreenPresentationViewer({
 
     SlideIframeComponent.displayName = 'SlideIframeComponent';
     return SlideIframeComponent;
-  }, [sandboxUrl, sandboxId, session?.access_token, refreshTimestamp, showEditor]);
+  }, [sandboxUrl, sandboxId, session?.access_token, refreshTimestamp]);
 
   // Render slide iframe with proper scaling
   const renderSlide = useMemo(() => {
@@ -486,7 +599,7 @@ export function FullScreenPresentationViewer({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              title={showEditor ? "Close editor" : "Edit presentation"}
+              title={showEditor ? "Close slide editor" : "Edit current slide"}
               onClick={() => setShowEditor(!showEditor)}
             >
               {showEditor ? <Presentation className="h-3.5 w-3.5" /> : <Edit className='h-3.5 w-3.5'/>}
@@ -553,7 +666,44 @@ export function FullScreenPresentationViewer({
 
       {/* Main Content Area */}
       <div className="flex-1 flex items-center justify-center bg-zinc-100 dark:bg-zinc-900 p-2 min-h-0">
-        {error ? (
+        {showEditor ? (
+          <div className="w-full h-full max-w-[1800px] mx-auto rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 overflow-hidden">
+            <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-zinc-200 dark:border-zinc-800">
+              <div>
+                <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                  Editing slide {currentSlide}
+                </p>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Edit the raw HTML for the current slide directly in Suna.
+                </p>
+              </div>
+            </div>
+
+            {isEditorLoading ? (
+              <div className="h-[calc(100%-65px)] flex items-center justify-center">
+                <KortixLoader />
+              </div>
+            ) : editorError ? (
+              <div className="h-[calc(100%-65px)] flex items-center justify-center px-6 text-center">
+                <div>
+                  <AlertTriangle className="h-10 w-10 mx-auto mb-3 text-zinc-500 dark:text-zinc-400" />
+                  <p className="text-zinc-700 dark:text-zinc-300 mb-2">Unable to load slide editor</p>
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400 break-words">{editorError}</p>
+                </div>
+              </div>
+            ) : (
+              <CodeEditor
+                content={editorContent}
+                originalContent={editorOriginalContent}
+                fileName={currentSlideData?.filename || `slide_${currentSlide}.html`}
+                language="html"
+                onChange={setEditorContent}
+                onSave={handleSaveEditorContent}
+                className="h-[calc(100%-65px)]"
+              />
+            )}
+          </div>
+        ) : error ? (
           <div className="text-center max-w-2xl px-6">
             <AlertTriangle className="h-10 w-10 mx-auto mb-3 text-zinc-500 dark:text-zinc-400" />
             <p className="text-zinc-700 dark:text-zinc-300 mb-3">Unable to load presentation</p>

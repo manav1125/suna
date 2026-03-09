@@ -31,16 +31,17 @@ if TYPE_CHECKING:
 ### PRESENTATION CREATION WORKFLOW
 
 **MANDATORY QUALITY GATES (DO NOT SKIP):**
-- If you call `load_template_design` with `presentation_name`, you MUST then use `create_slide` to overwrite the initialized slides while inheriting the copied template's design system and assets. `populate_template_slide` is now a legacy fallback for exact template surgery only.
+- If you call `load_template_design` with `presentation_name`, you MUST then use `create_slide` to replace the initialized placeholder content while preserving the copied template's framework/layout, design system, and assets. `populate_template_slide` is now a legacy fallback for exact template surgery only.
 - If you are using a built-in template, initialize the template first and then use `create_slide` for the actual slide output so the deck stays deterministic.
 - Never finish right after template copy; template copy is setup only, not final output.
 - Every custom slide must include a clear visual structure (styled layout, chart/table/image/iconography), not plain text-only HTML.
 - If using `../images/...` paths, ensure those files actually exist first.
 - For custom slides, do NOT hotlink public internet image URLs directly inside `<img src="">`. Download them into `presentations/images/` first or use generated workspace assets.
+- If the user asks for no images or wants images removed from a deck, keep the work inside presentation tools and create/update the slide without visuals. Do NOT use canvas tools for that.
 
 **🚨 CRITICAL: This tool provides the create_slide function for presentations!**
 - **Use create_slide for both custom-theme decks and template-initialized decks**
-- **For template-based presentations, load the template with `presentation_name` first, then use create_slide to render each slide with the inherited template design system**
+- **For template-based presentations, load the template with `presentation_name` first, then use create_slide to preserve the template framework while rendering each real slide**
 - **NEVER** use generic create_file to create presentation slides
 - This tool is specialized for presentation creation with proper formatting, validation, and navigation
 
@@ -1007,11 +1008,333 @@ class SandboxPresentationTool(SandboxToolsBase):
             "presentation_name": presentation_name,
             "presentation_title": presentation_title,
             "template_source": metadata.get("template_source"),
+            "template_reference_dir": metadata.get("template_reference_dir") or ".template_reference",
+            "template_slide_count": int(metadata.get("template_slide_count") or 0),
             "deck_title": metadata.get("title") or presentation_title or presentation_name,
             "font_family": font_family,
             "palette": palette,
             "background_asset": background_asset,
         }
+
+    def _is_template_placeholder_text(self, value: str) -> bool:
+        normalized = re.sub(r"\s+", " ", (value or "").strip().lower())
+        if not normalized:
+            return False
+
+        placeholder_markers = [
+            "lorem ipsum",
+            "yourwebsite.org",
+            "slidekit",
+            "presentation system 2025",
+            "elevator pitch template",
+            "elevator pitch example",
+            "brightpath",
+            "this document sets out a full creative brief",
+            "in this project, we will design and ship a new brand design system",
+            "we'll define the primary goal of the project",
+            "gradient background",
+        ]
+        return any(marker in normalized for marker in placeholder_markers) or self._is_instruction_like_text(normalized)
+
+    def _should_omit_slide_visual(self, slide_content: str, semantics: Dict[str, object]) -> bool:
+        haystacks = [
+            slide_content or "",
+            str(semantics.get("visual_brief") or ""),
+            str(semantics.get("lead") or ""),
+        ]
+        patterns = [
+            r"\bno images?\b",
+            r"\bwithout images?\b",
+            r"\bno visual(?:s)?\b",
+            r"\bwithout visual(?:s)?\b",
+            r"\btext[- ]only\b",
+            r"\bskip (?:the )?images?\b",
+            r"\bdo not add images?\b",
+            r"\bdo not use images?\b",
+            r"\bremove images?\b",
+            r"\bimage\s*:\s*none\b",
+            r"\bvisual\s*:\s*none\b",
+        ]
+        for haystack in haystacks:
+            lowered = (haystack or "").lower()
+            if any(re.search(pattern, lowered) for pattern in patterns):
+                return True
+        return False
+
+    def _extract_primary_domain(self, values: List[str]) -> Optional[str]:
+        for value in values:
+            if not value:
+                continue
+            match = re.search(
+                r"(?:https?://)?(?:www\.)?([a-z0-9][a-z0-9.-]+\.[a-z]{2,})",
+                value,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return match.group(1).lower()
+        return None
+
+    def _derive_template_branding(
+        self,
+        semantics: Dict[str, object],
+        theme_context: Dict[str, Any],
+        slide_content: str,
+    ) -> Dict[str, str]:
+        deck_title = str(theme_context.get("deck_title") or "")
+        subject_hint = self._extract_subject_hint(deck_title, str(semantics.get("title") or ""))
+        domain = self._extract_primary_domain([
+            slide_content,
+            str(semantics.get("lead") or ""),
+            str(semantics.get("title") or ""),
+            deck_title,
+        ])
+
+        brand = re.sub(
+            r"\b(presentation|investor|pitch|deck|slides?|template|startup|company|overview)\b",
+            " ",
+            deck_title,
+            flags=re.IGNORECASE,
+        )
+        brand = re.sub(r"\s+", " ", brand).strip(" -_:")
+        if not brand:
+            brand = subject_hint
+        if not brand and domain:
+            brand = domain.split(".")[0].replace("-", " ").replace("_", " ").title()
+
+        return {
+            "brand": brand or deck_title or "Presentation",
+            "domain": domain or "",
+            "year": str(datetime.now().year),
+        }
+
+    def _shorten_template_label(self, value: str, fallback: str = "Insight") -> str:
+        cleaned = re.sub(r"\s+", " ", (value or "").strip()).strip(" -:;,.")
+        if not cleaned:
+            return fallback
+
+        cleaned = re.sub(r"^[0-9$%x+.,\s-]+", "", cleaned).strip() or cleaned
+        if ":" in cleaned:
+            cleaned = cleaned.split(":", 1)[0].strip() or cleaned
+        if len(cleaned) > 42:
+            words = cleaned.split()
+            cleaned = " ".join(words[:5]).strip()
+        return cleaned[:42].strip() or fallback
+
+    def _truncate_template_copy(self, value: str, max_chars: int = 180) -> str:
+        cleaned = re.sub(r"\s+", " ", (value or "").strip())
+        if len(cleaned) <= max_chars:
+            return cleaned
+        truncated = cleaned[: max_chars - 1].rsplit(" ", 1)[0].strip()
+        return truncated or cleaned[:max_chars].strip()
+
+    def _set_element_text(self, element: Any, value: str) -> None:
+        if element is None:
+            return
+        element.clear()
+        element.append(value)
+
+    def _hide_template_element(self, element: Any) -> None:
+        if element is None:
+            return
+        existing = (element.get("style") or "").strip().rstrip(";")
+        hide_style = "display: none !important"
+        element["style"] = f"{existing}; {hide_style}" if existing else hide_style
+
+    def _select_template_reference_slide_number(self, requested_slide: int, template_slide_count: int) -> int:
+        if template_slide_count <= 0:
+            return requested_slide
+        if requested_slide <= template_slide_count:
+            return requested_slide
+        if template_slide_count <= 2:
+            return template_slide_count
+        reusable_span = template_slide_count - 1
+        return 2 + ((requested_slide - 2) % reusable_span)
+
+    async def _load_template_reference_html(
+        self,
+        presentation_path: str,
+        slide_number: int,
+        theme_context: Dict[str, Any],
+    ) -> Optional[str]:
+        reference_dir = str(theme_context.get("template_reference_dir") or ".template_reference")
+        template_slide_count = int(theme_context.get("template_slide_count") or 0)
+        reference_slide_number = self._select_template_reference_slide_number(slide_number, template_slide_count)
+        slide_filename = f"slide_{reference_slide_number:02d}.html"
+        slide_path = f"{presentation_path}/{reference_dir}/{slide_filename}"
+        try:
+            content = await self.sandbox.fs.download_file(slide_path)
+        except Exception:
+            return None
+        return content.decode() if isinstance(content, bytes) else str(content)
+
+    async def _render_template_reference_slide(
+        self,
+        presentation_path: str,
+        slide_content: str,
+        semantics: Dict[str, object],
+        theme_context: Dict[str, Any],
+        slide_number: int,
+        slide_title: str,
+        presentation_title: str,
+        omit_visual: bool,
+    ) -> Optional[str]:
+        reference_html = await self._load_template_reference_html(
+            presentation_path=presentation_path,
+            slide_number=slide_number,
+            theme_context=theme_context,
+        )
+        if not reference_html:
+            return None
+
+        soup = BeautifulSoup(reference_html, "html.parser")
+        branding = self._derive_template_branding(semantics, theme_context, slide_content)
+        title_text = str(semantics.get("title") or slide_title or "Slide").strip()
+        lead_text = self._truncate_template_copy(str(semantics.get("lead") or title_text), 220)
+        supporting = [self._truncate_template_copy(str(item), 180) for item in semantics.get("supporting", []) if item]
+        key_points = [self._truncate_template_copy(str(item), 120) for item in semantics.get("key_points", []) if item]
+        metrics = [self._truncate_template_copy(str(item), 120) for item in semantics.get("metrics", []) if item]
+
+        title_labels = [title_text] + [self._shorten_template_label(item) for item in (key_points + metrics + supporting)]
+        body_copy = [lead_text] + supporting + key_points + metrics
+        body_copy = [item for item in body_copy if item]
+        if not body_copy:
+            body_copy = [lead_text]
+
+        title_queue = title_labels.copy()
+        body_queue = body_copy.copy()
+
+        def next_title(default: str = title_text) -> str:
+            return title_queue.pop(0) if title_queue else default
+
+        def next_body(default: str = lead_text) -> str:
+            return body_queue.pop(0) if body_queue else default
+
+        def assign_selectors(selectors: List[str], values: List[str], fallback_hide: bool = False) -> None:
+            used: set[int] = set()
+            queue = [value for value in values if value]
+            for selector in selectors:
+                for element in soup.select(selector):
+                    marker = id(element)
+                    if marker in used:
+                        continue
+                    used.add(marker)
+                    if queue:
+                        self._set_element_text(element, queue.pop(0))
+                    elif fallback_hide:
+                        self._hide_template_element(element)
+
+        # Preserve well-known template framing while replacing placeholder copy.
+        assign_selectors([".brand"], [branding["brand"]])
+        assign_selectors([".company-name"], [branding["brand"]], fallback_hide=False)
+        assign_selectors([".year"], [branding["year"]])
+        assign_selectors([".website"], [branding["domain"]], fallback_hide=not bool(branding["domain"]))
+        assign_selectors([".slide-number", ".section-number"], [str(slide_number)])
+
+        cards = soup.select(".card")
+        if cards:
+            card_items = key_points or supporting or metrics or [lead_text]
+            for index, card in enumerate(cards):
+                item = card_items[index] if index < len(card_items) else ""
+                title_el = card.select_one(".card-title")
+                text_el = card.select_one(".card-text")
+                if title_el:
+                    self._set_element_text(title_el, self._shorten_template_label(item or f"Point {index + 1}", fallback=f"Point {index + 1}"))
+                if text_el:
+                    self._set_element_text(text_el, self._truncate_template_copy(item or lead_text, 140))
+
+        index_items = soup.select(".index-item")
+        if index_items:
+            outline_items = [next_title()] + [self._shorten_template_label(item) for item in (key_points + supporting)]
+            for index, item in enumerate(index_items, start=1):
+                title_el = item.select_one(".index-title")
+                number_el = item.select_one(".index-number")
+                if title_el:
+                    label = outline_items[index - 1] if index - 1 < len(outline_items) else f"Section {index}"
+                    self._set_element_text(title_el, label)
+                if number_el:
+                    self._set_element_text(number_el, str(index))
+
+        main_title = soup.select_one(".main-title")
+        if main_title:
+            self._set_element_text(main_title, next_title())
+
+        assign_selectors(
+            [
+                ".subtitle",
+                ".section-heading",
+                ".description-text",
+                ".green-box-text",
+                ".purple-box-title",
+                ".purple-box-text",
+                ".text-paragraph",
+                ".top-text-box",
+                ".section-description",
+                ".overlay-text",
+            ],
+            [next_body() for _ in range(8)],
+        )
+
+        # Replace any lingering placeholder nodes with remaining researched content.
+        replacement_pool = [item for item in ([next_title()] + body_queue + title_queue) if item]
+        for node in soup.find_all(string=True):
+            if not isinstance(node, NavigableString):
+                continue
+            parent = node.parent
+            if parent and parent.name in {"style", "script", "title", "head"}:
+                continue
+            current = re.sub(r"\s+", " ", str(node).strip())
+            if not current or not self._is_template_placeholder_text(current):
+                continue
+            if replacement_pool:
+                node.replace_with(replacement_pool.pop(0))
+
+        visual_src = None
+        image = semantics.get("image") if isinstance(semantics.get("image"), dict) else None
+        if image and (image.get("src") or "").strip():
+            visual_src = (image.get("src") or "").strip()
+        elif not omit_visual:
+            visual_prompt = self._build_slide_visual_prompt(
+                semantics=semantics,
+                layout_variant=self._choose_layout_variant(semantics, slide_number),
+                theme_context=theme_context,
+            )
+            visual_src = await self._generate_slide_visual_asset(
+                prompt=visual_prompt,
+                presentation_name=str(theme_context.get("presentation_name") or presentation_title),
+                slide_number=slide_number,
+            )
+
+        image_tags = [
+            image_tag for image_tag in soup.find_all("img")
+            if "logo" not in ((image_tag.get("alt") or "") + " " + (image_tag.get("src") or "")).lower()
+        ]
+
+        if omit_visual:
+            for image_tag in image_tags:
+                hide_target = image_tag
+                for ancestor in image_tag.parents:
+                    if getattr(ancestor, "name", None) in {"div", "figure", "section"}:
+                        classes = " ".join(ancestor.get("class", []))
+                        if any(token in classes.lower() for token in ("image", "photo", "portrait", "visual", "media", "background", "side")):
+                            hide_target = ancestor
+                            break
+                self._hide_template_element(hide_target)
+        elif visual_src:
+            for image_tag in image_tags:
+                image_tag["src"] = visual_src
+                image_tag["alt"] = title_text
+
+        if soup.title:
+            soup.title.string = f"{presentation_title or branding['brand']} - Slide {slide_number}"
+
+        preserved_assets: List[str] = []
+        for tag in soup.select("head link[rel='stylesheet'], head script[src], head style"):
+            serialized = str(tag).strip()
+            if serialized:
+                preserved_assets.append(serialized)
+
+        body = soup.body or soup
+        return "".join(preserved_assets + [str(child) for child in body.contents])
 
     def _choose_layout_variant(self, semantics: Dict[str, object], slide_number: int) -> str:
         title = str(semantics.get("title") or "").lower()
@@ -1607,14 +1930,19 @@ class SandboxPresentationTool(SandboxToolsBase):
         presentation_title: str,
         slide_number: int,
         theme_context: Dict[str, Any],
+        semantics: Optional[Dict[str, object]] = None,
+        omit_visual: Optional[bool] = None,
     ) -> str:
         """Auto-design simple slide fragments into a polished fixed-layout presentation slide."""
-        semantics = self._extract_slide_semantics(slide_content, slide_title)
+        semantics = semantics or self._extract_slide_semantics(slide_content, slide_title)
         layout_variant = self._choose_layout_variant(semantics, slide_number)
+        omit_visual = self._should_omit_slide_visual(slide_content, semantics) if omit_visual is None else omit_visual
 
         image = semantics.get("image") if isinstance(semantics.get("image"), dict) else None
         visual_src = (image or {}).get("src") if image else None
-        if not visual_src:
+        if omit_visual:
+            visual_src = None
+        elif not visual_src:
             visual_prompt = self._build_slide_visual_prompt(semantics, layout_variant, theme_context)
             visual_src = await self._generate_slide_visual_asset(
                 prompt=visual_prompt,
@@ -2308,7 +2636,7 @@ class SandboxPresentationTool(SandboxToolsBase):
         "type": "function",
         "function": {
             "name": "create_slide",
-            "description": "Create or update a single slide in a presentation. **WHEN TO USE**: Use this for both custom-theme decks and template-initialized decks. If a template was initialized via load_template_design with presentation_name, this tool will inherit the template's design system and assets when rendering the slide. **WHEN TO SKIP**: Only skip this if you explicitly need exact DOM-preserving edits inside the copied template, in which case use populate_template_slide. **PARALLEL EXECUTION**: This function supports parallel execution - create ALL slides simultaneously by using create_slide multiple times in parallel for much faster completion. Each slide is saved as a standalone HTML file with 1920x1080 dimensions (16:9 aspect ratio). Slides are automatically validated to ensure both width (≤1920px) and height (≤1080px) limits are met. Use `box-sizing: border-box` on containers with padding to prevent dimension overflow. **CRITICAL**: You MUST have completed research, outline, and visual planning before using this tool. All styling MUST be derived from the custom color scheme/design elements or the initialized template design system. **IMAGE RULE**: Do not hotlink public internet image URLs directly in slide HTML - download them into presentations/images/ first. **PRESENTATION DESIGN NOT WEBSITE**: Use fixed pixel dimensions, absolute positioning, and fixed layouts - NO responsive design patterns. **BEST INPUT FORMAT**: Prefer a research-backed slide brief with a clear thesis, 3-5 evidence bullets, 1-3 metrics/facts, and a visual brief; the tool can auto-render that into a polished slide. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `presentation_name` (REQUIRED), `slide_number` (REQUIRED), `slide_title` (REQUIRED), `content` (REQUIRED), `presentation_title` (optional). **❌ DO NOT USE**: `file_path` - this parameter does NOT exist!",
+            "description": "Create or update a single slide in a presentation. **WHEN TO USE**: Use this for both custom-theme decks and template-initialized decks. If a template was initialized via load_template_design with presentation_name, this tool should preserve the copied template's framework/layout while replacing the content with researched slide material. **WHEN TO SKIP**: Only skip this if you explicitly need exact DOM-preserving edits inside the copied template, in which case use populate_template_slide. **PARALLEL EXECUTION**: This function supports parallel execution - create ALL slides simultaneously by using create_slide multiple times in parallel for much faster completion. Each slide is saved as a standalone HTML file with 1920x1080 dimensions (16:9 aspect ratio). Slides are automatically validated to ensure both width (≤1920px) and height (≤1080px) limits are met. Use `box-sizing: border-box` on containers with padding to prevent dimension overflow. **CRITICAL**: You MUST have completed research, outline, and visual planning before using this tool. All styling MUST be derived from the custom color scheme/design elements or the initialized template design system. **IMAGE RULE**: Do not hotlink public internet image URLs directly in slide HTML - download them into presentations/images/ first. If the user asks for no images, create the slide without visuals instead of calling canvas tools. **PRESENTATION DESIGN NOT WEBSITE**: Use fixed pixel dimensions, absolute positioning, and fixed layouts - NO responsive design patterns. **BEST INPUT FORMAT**: Prefer a research-backed slide brief with a clear thesis, 3-5 evidence bullets, 1-3 metrics/facts, and a visual brief; the tool can auto-render that into a polished slide. **🚨 PARAMETER NAMES**: Use EXACTLY these parameter names: `presentation_name` (REQUIRED), `slide_number` (REQUIRED), `slide_title` (REQUIRED), `content` (REQUIRED), `presentation_title` (optional). **❌ DO NOT USE**: `file_path` - this parameter does NOT exist!",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2490,15 +2818,45 @@ class SandboxPresentationTool(SandboxToolsBase):
             
             # Auto-apply a curated visual shell when the model returns low-structure slide fragments.
             final_content = content
-            if self._is_plain_slide_content(content) or self._should_auto_design_slide(content):
-                final_content = await self._apply_visual_baseline(
-                    slide_content=content,
-                    slide_title=slide_title,
-                    presentation_name=presentation_name,
-                    presentation_title=effective_presentation_title,
-                    slide_number=slide_number,
-                    theme_context=theme_context,
-                )
+            semantics = self._extract_slide_semantics(content, slide_title)
+            omit_visual = self._should_omit_slide_visual(content, semantics)
+            should_auto_render = self._is_plain_slide_content(content) or self._should_auto_design_slide(content)
+            if should_auto_render:
+                if theme_context.get("template_source"):
+                    rendered_template_content = await self._render_template_reference_slide(
+                        presentation_path=presentation_path,
+                        slide_content=content,
+                        semantics=semantics,
+                        theme_context=theme_context,
+                        slide_number=slide_number,
+                        slide_title=slide_title,
+                        presentation_title=effective_presentation_title,
+                        omit_visual=omit_visual,
+                    )
+                    if rendered_template_content:
+                        final_content = rendered_template_content
+                    else:
+                        final_content = await self._apply_visual_baseline(
+                            slide_content=content,
+                            slide_title=slide_title,
+                            presentation_name=presentation_name,
+                            presentation_title=effective_presentation_title,
+                            slide_number=slide_number,
+                            theme_context=theme_context,
+                            semantics=semantics,
+                            omit_visual=omit_visual,
+                        )
+                else:
+                    final_content = await self._apply_visual_baseline(
+                        slide_content=content,
+                        slide_title=slide_title,
+                        presentation_name=presentation_name,
+                        presentation_title=effective_presentation_title,
+                        slide_number=slide_number,
+                        theme_context=theme_context,
+                        semantics=semantics,
+                        omit_visual=omit_visual,
+                    )
 
             # Parallel create_slide calls can race and overwrite metadata.
             # Serialize write operations per presentation to keep all slide entries.

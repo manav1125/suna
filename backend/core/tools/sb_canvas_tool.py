@@ -74,6 +74,7 @@ ai_process_canvas_element(
 - NEVER call add_image_to_canvas in PARALLEL - causes race conditions!
 - Use list_canvas_elements to get element IDs before processing
 - For frame sizes not in presets: ASK the user OR use web_search to find dimensions
+- Do NOT use canvas tools to edit or debug presentation slides. Presentation decks should stay inside the presentation tool workflow.
 """
 )
 class SandboxCanvasTool(SandboxToolsBase):

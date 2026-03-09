@@ -786,7 +786,7 @@ export function ThreadComponent({ projectId, threadId, compact = false, configur
 
   const buildTemplateWorkflowInstruction = useCallback((templateId: string) => {
     const templateName = formatTemplateName(templateId);
-    return `Use the presentation template with exact id "${templateId}" (${templateName}). First call load_template_design with template_name="${templateId}" and a presentation_name. Treat the template as a theme initializer only. Then use create_slide to create each real slide while inheriting the initialized template design system and copied assets. Each slide must be driven by a research-backed brief with a thesis, evidence bullets, hard facts or metrics, and a visual brief. Do not reuse template placeholder copy or example text. Use populate_template_slide only if you explicitly need exact DOM-preserving edits.`;
+    return `Use the presentation template with exact id "${templateId}" (${templateName}). First call load_template_design with template_name="${templateId}" and a presentation_name. Then use create_slide to create each real slide while preserving the chosen template's framework/layout and replacing the placeholder content with researched material. Each slide must be driven by a research-backed brief with a thesis, evidence bullets, hard facts or metrics, and a visual brief. If the user asks for no images, keep the slide text-only and do not call canvas tools. Do not reuse template placeholder copy or example text. Use populate_template_slide only if you explicitly need exact DOM-preserving edits.`;
   }, [formatTemplateName]);
 
   // Mode Starter handlers
