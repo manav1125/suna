@@ -13,10 +13,10 @@ export function KnowledgeBasePage() {
                     <KnowledgeBaseManager
                         showHeader={true}
                         headerTitle="Library"
-                        headerDescription="Upload documents once, organize them into folders, then assign the right files to each worker from its Knowledge tab."
+                        headerDescription="Upload documents once, organize them into folders, then assign the right files to each worker directly from this library or from each worker's Knowledge tab."
                         showRecentFiles={false}
                         enableAssignments={false}
-                        emptyStateMessage="Start by adding files to your shared knowledge library. You can assign them to individual workers from each worker's Knowledge tab."
+                        emptyStateMessage="Start by adding files to your shared knowledge library. From here, you can assign files and folders to individual workers whenever they need them."
                     />
                 </div>
             </div>

@@ -12,7 +12,7 @@ export const KnowledgeBasePageHeader = () => {
           <span className="text-primary">Knowledge Base</span>
         </div>
         <p className="mx-auto max-w-2xl text-sm sm:text-base text-muted-foreground">
-          Keep a shared document library for your workspace, then assign the relevant files to each worker as needed.
+          Keep a shared document library for your workspace, then assign the relevant files and folders to each worker as needed.
         </p>
       </div>
     </PageHeader>

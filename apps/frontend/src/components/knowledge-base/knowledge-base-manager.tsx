@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { toast } from '@/lib/toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,10 +9,6 @@ import {
     FolderIcon,
     FileIcon,
     PlusIcon,
-    TrashIcon,
-    ChevronDownIcon,
-    ChevronRightIcon,
-    MoreVerticalIcon
 } from 'lucide-react';
 import {
     DndContext,
@@ -30,17 +26,12 @@ import {
     sortableKeyboardCoordinates,
     verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { SharedTreeItem, FileDragOverlay } from './shared-kb-tree';
 import { UnifiedKbEntryModal } from './unified-kb-entry-modal';
 import { KBFilePreviewModal } from './kb-file-preview-modal';
 import { EditSummaryModal } from './edit-summary-modal';
 import { KBDeleteConfirmDialog } from './kb-delete-confirm-dialog';
+import { KBWorkerAssignmentModal, type WorkerAssignmentTarget } from './kb-worker-assignment-modal';
 import { useKnowledgeFolders, type Folder, type Entry } from '@/hooks/knowledge-base/use-folders';
 import { FileNameValidator } from '@/lib/validation';
 import { backendApi } from '@/lib/api-client';
@@ -105,6 +96,7 @@ export function KnowledgeBaseManager({
     // Assignment state for agent mode
     const [selectedEntries, setSelectedEntries] = useState<Set<string>>(new Set());
     const [assignmentsLoading, setAssignmentsLoading] = useState(false);
+    const [workerAssignmentTarget, setWorkerAssignmentTarget] = useState<WorkerAssignmentTarget | null>(null);
 
     // Modal states
     const [deleteConfirm, setDeleteConfirm] = useState<{
@@ -157,117 +149,7 @@ export function KnowledgeBaseManager({
         })
     );
 
-    // Build tree structure and auto-expand all folders for assignment mode
-    React.useEffect(() => {
-        const buildTree = () => {
-            const tree: TreeItem[] = folders.map(folder => {
-                const existingFolder = treeData.find(item => item.id === folder.folder_id);
-                // Auto-expand all folders in assignment mode, preserve state otherwise
-                const isExpanded = enableAssignments ? true : (existingFolder?.expanded || false);
-
-                return {
-                    id: folder.folder_id,
-                    type: 'folder' as const,
-                    name: folder.name,
-                    data: folder,
-                    children: folderEntries[folder.folder_id]?.map(entry => ({
-                        id: entry.entry_id,
-                        type: 'file' as const,
-                        name: entry.filename,
-                        parentId: folder.folder_id,
-                        data: entry,
-                    })) || [],
-                    expanded: isExpanded,
-                };
-            });
-            setTreeData(tree);
-        };
-
-        buildTree();
-    }, [folders, folderEntries, enableAssignments]);
-
-    // Load assignments and auto-fetch all folder entries for assignment mode
-    React.useEffect(() => {
-        if (enableAssignments && agentId) {
-            console.log('Loading assignments immediately for agent:', agentId);
-            loadAssignments();
-
-            // Auto-fetch all folder entries in assignment mode
-            if (!foldersLoading && folders.length > 0) {
-                console.log('Auto-fetching all folder entries for assignment mode');
-                folders.forEach(folder => {
-                    if (!folderEntries[folder.folder_id]) {
-                        fetchFolderEntries(folder.folder_id);
-                    }
-                });
-            }
-        }
-    }, [enableAssignments, agentId, foldersLoading, folders]);
-
-    const loadAssignments = async () => {
-        if (!agentId) return;
-
-        console.log('🔄 Starting to load assignments for agent:', agentId);
-        setAssignmentsLoading(true);
-        try {
-            const supabase = createClient();
-            const { data: { session } } = await supabase.auth.getSession();
-
-            if (!session?.access_token) {
-                console.warn('❌ No access token available for assignments');
-                return;
-            }
-
-            console.log('📡 Fetching assignments from API...');
-            const response = await fetch(`${API_URL}/knowledge-base/agents/${agentId}/assignments`, {
-                headers: {
-                    'Authorization': `Bearer ${session.access_token}`,
-                    'Content-Type': 'application/json'
-                }
-            });
-
-            console.log('📡 Assignments response status:', response.status);
-
-            if (response.ok) {
-                const assignments = await response.json();
-                console.log('📊 Raw assignments data:', assignments);
-
-                const selectedSet = new Set<string>();
-                Object.entries(assignments).forEach(([entryId, enabled]) => {
-                    if (enabled) {
-                        selectedSet.add(entryId);
-                        console.log('✅ Added to selection:', entryId);
-                    } else {
-                        console.log('❌ Not selected:', entryId);
-                    }
-                });
-                console.log('🎯 Final selected entries:', Array.from(selectedSet));
-                setSelectedEntries(selectedSet);
-            } else {
-                const errorText = await response.text();
-                console.error('❌ Failed to load assignments:', response.status, errorText);
-            }
-        } catch (error) {
-            console.error('❌ Error loading assignments:', error);
-        } finally {
-            setAssignmentsLoading(false);
-            console.log('✅ Assignment loading complete');
-        }
-    };
-
-    // File handling functions
-    const handleFileSelect = (item: TreeItem) => {
-        if (item.type === 'file' && item.data && 'entry_id' in item.data) {
-            setFilePreviewModal({
-                isOpen: true,
-                file: item.data,
-            });
-        } else {
-            setSelectedItem(item);
-        }
-    };
-
-    const fetchFolderEntries = async (folderId: string) => {
+    const fetchFolderEntries = useCallback(async (folderId: string): Promise<Entry[]> => {
         setLoadingFolders(prev => ({ ...prev, [folderId]: true }));
 
         try {
@@ -285,14 +167,113 @@ export function KnowledgeBaseManager({
                 }
             });
 
-            if (response.ok) {
-                const data = await response.json();
-                setFolderEntries(prev => ({ ...prev, [folderId]: data }));
+            if (!response.ok) {
+                return [];
             }
+
+            const data = await response.json();
+            setFolderEntries(prev => ({ ...prev, [folderId]: data }));
+            return data;
         } catch (error) {
             console.error('Failed to fetch entries:', error);
+            return [];
         } finally {
             setLoadingFolders(prev => ({ ...prev, [folderId]: false }));
+        }
+    }, []);
+
+    const loadAssignments = useCallback(async () => {
+        if (!agentId) return;
+
+        setAssignmentsLoading(true);
+        try {
+            const supabase = createClient();
+            const { data: { session } } = await supabase.auth.getSession();
+
+            if (!session?.access_token) {
+                return;
+            }
+
+            const response = await fetch(`${API_URL}/knowledge-base/agents/${agentId}/assignments`, {
+                headers: {
+                    'Authorization': `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (response.ok) {
+                const assignments = await response.json();
+
+                const selectedSet = new Set<string>();
+                Object.entries(assignments).forEach(([entryId, enabled]) => {
+                    if (enabled) {
+                        selectedSet.add(entryId);
+                    }
+                });
+                setSelectedEntries(selectedSet);
+            } else {
+                const errorText = await response.text();
+                console.error('Failed to load assignments:', response.status, errorText);
+            }
+        } catch (error) {
+            console.error('Error loading assignments:', error);
+        } finally {
+            setAssignmentsLoading(false);
+        }
+    }, [agentId]);
+
+    // Build tree structure and auto-expand all folders for assignment mode
+    React.useEffect(() => {
+        setTreeData((previous) => folders.map(folder => {
+            const existingFolder = previous.find(item => item.id === folder.folder_id);
+            const isExpanded = enableAssignments ? true : (existingFolder?.expanded || false);
+
+            return {
+                id: folder.folder_id,
+                type: 'folder' as const,
+                name: folder.name,
+                data: folder,
+                children: folderEntries[folder.folder_id]?.map(entry => ({
+                    id: entry.entry_id,
+                    type: 'file' as const,
+                    name: entry.filename,
+                    parentId: folder.folder_id,
+                    data: entry,
+                })) || [],
+                expanded: isExpanded,
+            };
+        }));
+    }, [folders, folderEntries, enableAssignments]);
+
+    React.useEffect(() => {
+        if (!enableAssignments || !agentId) {
+            return;
+        }
+
+        void loadAssignments();
+    }, [enableAssignments, agentId, loadAssignments]);
+
+    React.useEffect(() => {
+        if (!enableAssignments || foldersLoading || folders.length === 0) {
+            return;
+        }
+
+        folders.forEach((folder) => {
+            if (!folderEntries[folder.folder_id]) {
+                void fetchFolderEntries(folder.folder_id);
+            }
+        });
+    }, [enableAssignments, folders, folderEntries, foldersLoading, fetchFolderEntries]);
+
+    // File handling functions
+    const handleFileSelect = (item: TreeItem) => {
+        if (item.type === 'file' && item.data && 'entry_id' in item.data) {
+            setFilePreviewModal({
+                isOpen: true,
+                file: item.data,
+            });
+        } else {
+            setSelectedItem(item);
         }
     };
 
@@ -316,6 +297,35 @@ export function KnowledgeBaseManager({
             setLoadingFolders(prev => ({ ...prev, [folderId]: false }));
         }
     };
+
+    const handleOpenWorkerAssignment = useCallback(async (item: TreeItem) => {
+        if (item.type === 'file') {
+            setWorkerAssignmentTarget({
+                id: item.id,
+                name: item.name,
+                type: 'file',
+                entryIds: [item.id],
+                fileCount: 1,
+            });
+            return;
+        }
+
+        const knownEntries = folderEntries[item.id] || [];
+        const entries = knownEntries.length > 0 ? knownEntries : await fetchFolderEntries(item.id);
+
+        if (entries.length === 0) {
+            toast.info('Add files to this folder before assigning it to workers.');
+            return;
+        }
+
+        setWorkerAssignmentTarget({
+            id: item.id,
+            name: item.name,
+            type: 'folder',
+            entryIds: entries.map((entry) => entry.entry_id),
+            fileCount: entries.length,
+        });
+    }, [fetchFolderEntries, folderEntries]);
 
     // Assignment functions for agent mode
     const getFolderSelectionState = (folderId: string) => {
@@ -1093,6 +1103,7 @@ export function KnowledgeBaseManager({
                                             onEditKeyPress={handleEditKeyPress}
                                             editInputRef={editInputRef}
                                             onNativeFileDrop={handleNativeFileDrop}
+                                            onAssignToWorkers={!enableAssignments ? handleOpenWorkerAssignment : undefined}
                                             uploadStatus={uploadStatus[item.id]}
                                             validationError={editingFolder === item.id ? validationError : null}
                                             isLoadingEntries={loadingFolders[item.id]}
@@ -1164,6 +1175,16 @@ export function KnowledgeBaseManager({
                     onEditSummary={handleEditSummary}
                 />
             )}
+
+            <KBWorkerAssignmentModal
+                isOpen={Boolean(workerAssignmentTarget)}
+                target={workerAssignmentTarget}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setWorkerAssignmentTarget(null);
+                    }
+                }}
+            />
         </div>
     );
 }

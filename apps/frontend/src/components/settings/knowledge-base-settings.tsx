@@ -11,10 +11,10 @@ export function KnowledgeBaseSettings() {
       <KnowledgeBaseManager
         showHeader={true}
         headerTitle={t('title') || 'Knowledge Base'}
-        headerDescription={t('description') || 'Upload and manage documents for your agents'}
+        headerDescription={t('description') || 'Upload and manage documents, then assign them to the right workers'}
         showRecentFiles={false}
         enableAssignments={false}
-        emptyStateMessage="Upload documents here once, then assign the right files to each worker from that worker's Knowledge tab."
+        emptyStateMessage="Upload documents here once, then assign the right files or folders to each worker from this library whenever needed."
       />
     </div>
   );

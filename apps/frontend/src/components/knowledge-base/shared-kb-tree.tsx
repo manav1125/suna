@@ -14,7 +14,8 @@ import {
     TrashIcon,
     Pen,
     GripVerticalIcon,
-    FileTextIcon
+    FileTextIcon,
+    Users2Icon
 } from 'lucide-react';
 import { KortixLoader } from '@/components/ui/kortix-loader';
 import {
@@ -58,6 +59,7 @@ interface SharedTreeItemProps {
     onEditChange?: (name: string) => void;
     onEditKeyPress?: (e: React.KeyboardEvent) => void;
     onEditSummary?: (id: string, name: string, summary: string) => void;
+    onAssignToWorkers?: (item: TreeItem) => void;
     editInputRef?: React.RefObject<HTMLInputElement>;
     onNativeFileDrop?: (files: FileList, folderId: string) => void;
 
@@ -105,6 +107,7 @@ export function SharedTreeItem({
     onEditChange,
     onEditKeyPress,
     onEditSummary,
+    onAssignToWorkers,
     editInputRef,
     onNativeFileDrop,
     editingFolder,
@@ -326,6 +329,17 @@ export function SharedTreeItem({
                                                     Rename
                                                 </DropdownMenuItem>
                                             )}
+                                            {onAssignToWorkers && (
+                                                <DropdownMenuItem
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        onAssignToWorkers(item);
+                                                    }}
+                                                >
+                                                    <Users2Icon className="h-3 w-3 mr-2" />
+                                                    Assign to Workers
+                                                </DropdownMenuItem>
+                                            )}
                                             <DropdownMenuItem
                                                 onClick={(e) => {
                                                     e.stopPropagation();
@@ -475,6 +489,17 @@ export function SharedTreeItem({
                                                 <FileTextIcon className="h-3 w-3 mr-2" />
                                                 Edit Summary
                                             </DropdownMenuItem>
+                                            {onAssignToWorkers && (
+                                                <DropdownMenuItem
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        onAssignToWorkers(item);
+                                                    }}
+                                                >
+                                                    <Users2Icon className="h-3 w-3 mr-2" />
+                                                    Assign to Workers
+                                                </DropdownMenuItem>
+                                            )}
                                             <DropdownMenuItem
                                                 onClick={(e) => {
                                                     e.stopPropagation();
