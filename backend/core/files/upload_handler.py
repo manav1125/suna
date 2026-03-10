@@ -151,10 +151,22 @@ def rewrite_attached_file_refs(
             continue
 
         original_reference = f"uploads/{original_filename}"
-        updated_prompt = updated_prompt.replace(
-            f"-> {original_reference}]",
-            f"-> {reference_path}]",
+        absolute_original_reference = f"/workspace/{original_reference}"
+
+        # The chat UI still emits `[Uploaded File: uploads/<name>]` markers, while the
+        # parser may also add `[Attached: ... -> uploads/<name>]` markers. Rewrite both
+        # forms so agents always receive the real sandbox path after conflict renames.
+        replacements = (
+            (f"-> {original_reference}]", f"-> {reference_path}]"),
+            (f"-> {absolute_original_reference}]", f"-> {reference_path}]"),
+            (f"[Uploaded File: {original_reference}]", f"[Uploaded File: {reference_path}]"),
+            (f"[Uploaded File: {absolute_original_reference}]", f"[Uploaded File: {reference_path}]"),
+            (f"[Attached: {original_reference}]", f"[Attached: {reference_path}]"),
+            (f"[Attached: {absolute_original_reference}]", f"[Attached: {reference_path}]"),
         )
+
+        for before, after in replacements:
+            updated_prompt = updated_prompt.replace(before, after)
 
         if reference_path != original_reference:
             rename_notes.append(
