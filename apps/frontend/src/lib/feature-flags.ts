@@ -15,7 +15,7 @@ export const featureFlags = {
    */
   disableMobileAdvertising: parseEnvBoolean(
     process.env.NEXT_PUBLIC_DISABLE_MOBILE_ADVERTISING,
-    false,
+    true,
   ),
 } as const;
 
@@ -23,4 +23,3 @@ export const featureFlags = {
 if (process.env.NODE_ENV !== 'production') {
   console.log('[featureFlags]', featureFlags);
 }
-

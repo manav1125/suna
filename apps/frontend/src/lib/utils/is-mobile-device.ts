@@ -90,15 +90,14 @@ export function isAndroidTablet(): boolean {
 }
 
 /**
- * Store links for mobile app downloads
+ * Public app page. Mobile store distribution is not live yet.
  */
 export const MOBILE_APP_STORE_LINKS = {
-  ios: 'https://apps.apple.com/ie/app/kortix/id6754448524',
-  android: 'https://play.google.com/store/apps/details?id=com.kortix.app',
+  ios: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/app`,
+  android: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/app`,
 } as const;
 
 /**
  * Deep link scheme for opening the Kortix app
  */
 export const KORTIX_DEEP_LINK = 'kortix://';
-

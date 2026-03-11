@@ -18,9 +18,9 @@ function KortixSymbol({ size = 24, className }: { size?: number; className?: str
 }
 
 /**
- * Universal app download URL - middleware auto-redirects to correct store based on device
+ * Universal app download URL for the public app landing page.
  */
-export const APP_DOWNLOAD_URL = 'https://www.kortix.com/app';
+export const APP_DOWNLOAD_URL = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/app`;
 
 export interface AppDownloadQRProps {
   /** Size of the QR code in pixels */
@@ -34,8 +34,7 @@ export interface AppDownloadQRProps {
 }
 
 /**
- * QR code component that links to /app - automatically redirects to the correct
- * app store (iOS App Store or Google Play) based on the scanning device.
+ * QR code component that links to the public app page.
  */
 export function AppDownloadQR({ 
   size = 200, 
@@ -49,7 +48,7 @@ export function AppDownloadQR({
     <div className={cn("relative bg-white rounded-2xl p-4 shadow-lg", className)}>
       <img 
         src={qrUrl}
-        alt="Scan to download VentureVerse - redirects to App Store or Google Play based on your device"
+        alt="Scan to open the VentureVerse app page"
         width={size}
         height={size}
         className="block"

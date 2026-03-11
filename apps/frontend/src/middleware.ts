@@ -58,36 +58,8 @@ const PROTECTED_ROUTES = [
   '/settings',
 ];
 
-// App store links for mobile redirect
-const APP_STORE_LINKS = {
-  ios: 'https://apps.apple.com/ie/app/kortix/id6754448524',
-  android: 'https://play.google.com/store/apps/details?id=com.kortix.app',
-};
-
-// Detect mobile platform from User-Agent header (edge-optimized)
-function detectMobilePlatformFromUA(userAgent: string | null): 'ios' | 'android' | null {
-  if (!userAgent) return null;
-  const ua = userAgent.toLowerCase();
-  if (/iphone|ipad|ipod/.test(ua)) return 'ios';
-  if (/android/.test(ua)) return 'android';
-  return null;
-}
-
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  
-  // 🚀 HYPER-FAST: Mobile app store redirect for /milano, /berlin, and /app
-  // This runs at the edge before ANY page rendering
-  if (pathname === '/milano' || pathname === '/berlin' || pathname === '/app') {
-    const userAgent = request.headers.get('user-agent');
-    const platform = detectMobilePlatformFromUA(userAgent);
-    
-    if (platform) {
-      // Instant 302 redirect to app store - no page load needed
-      return NextResponse.redirect(APP_STORE_LINKS[platform], { status: 302 });
-    }
-    // Desktop users continue to the full page
-  }
 
   // Block access to WIP /thread/new route - redirect to dashboard
   if (pathname.includes('/thread/new')) {

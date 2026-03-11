@@ -216,14 +216,7 @@ export function HeroSection() {
           </div>
 
           <div className="mt-8 text-center text-[13px] text-muted-foreground leading-relaxed">
-            {tAuth('byContinuingYouAgreeSimple')}{' '}
-            <a href="/legal?tab=terms" target="_blank" rel="noopener noreferrer" className="text-foreground/70 hover:text-foreground underline underline-offset-2 transition-colors">
-              {tAuth('termsOfService')}
-            </a>{' '}
-            and{' '}
-            <a href="/legal?tab=privacy" target="_blank" rel="noopener noreferrer" className="text-foreground/70 hover:text-foreground underline underline-offset-2 transition-colors">
-              {tAuth('privacyPolicy')}
-            </a>
+            {tAuth('byContinuingYouAgreeSimple')} {tAuth('termsOfService')} and {tAuth('privacyPolicy')}
           </div>
         </DialogContent>
       </Dialog>

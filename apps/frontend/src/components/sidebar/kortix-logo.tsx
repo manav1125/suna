@@ -32,7 +32,7 @@ export function KortixLogo({ size = 24, variant = 'symbol', className }: KortixL
 
   return (
     <img
-      src="/kortix-symbol.svg"
+      src="/ventureverse-symbol.svg"
       alt="VentureVerse"
       className={cn('flex-shrink-0', className)}
       style={{ width: `${size}px`, height: `${size}px` }}

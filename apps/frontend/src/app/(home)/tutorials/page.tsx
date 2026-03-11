@@ -322,7 +322,7 @@ export default function TutorialsPage() {
                     Support
                   </a>
                   <a
-                    href="mailto:support@kortix.com"
+                    href="mailto:support@ventureverse.com"
                     className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors py-1"
                   >
                     <ChevronRight className="w-4 h-4" />
