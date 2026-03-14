@@ -32,6 +32,14 @@ interface VapiSessionResponse {
   agent_name?: string | null;
 }
 
+interface VapiHandoffResponse {
+  status: string;
+  message?: {
+    message_id?: string;
+  };
+  message_id?: string;
+}
+
 interface LiveVoiceButtonProps {
   threadId: string;
   selectedAgentId?: string;
@@ -53,7 +61,10 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
   const [activeAgentName, setActiveAgentName] = useState<string>('Mira');
 
   const vapiRef = useRef<any>(null);
-  const persistedKeysRef = useRef<Set<string>>(new Set());
+  const transcriptTurnsRef = useRef<PersistableTranscriptTurn[]>([]);
+  const transcriptKeysRef = useRef<Set<string>>(new Set());
+  const handoffPersistedRef = useRef(false);
+  const callIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -173,6 +184,85 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
     return turns;
   }, [extractText, normalizeRole]);
 
+  const buildTurnKey = useCallback((turn: PersistableTranscriptTurn) => {
+    return [turn.role, turn.timestamp ?? '', turn.text.trim()].join('::');
+  }, []);
+
+  const mergeTranscriptTurns = useCallback((turns: PersistableTranscriptTurn[]) => {
+    let changed = false;
+
+    for (const turn of turns) {
+      const text = turn.text.trim();
+      if (!text) continue;
+
+      const normalizedTurn = {
+        role: turn.role,
+        text,
+        timestamp: turn.timestamp ?? null,
+      };
+
+      const key = buildTurnKey(normalizedTurn);
+      if (transcriptKeysRef.current.has(key)) {
+        continue;
+      }
+
+      transcriptKeysRef.current.add(key);
+      transcriptTurnsRef.current.push(normalizedTurn);
+      changed = true;
+    }
+
+    if (changed) {
+      setTranscriptPreview(transcriptTurnsRef.current.slice(-8));
+    }
+  }, [buildTurnKey]);
+
+  const persistCallHandoff = useCallback(async () => {
+    if (handoffPersistedRef.current) {
+      return true;
+    }
+
+    const turns = transcriptTurnsRef.current
+      .map((turn) => ({
+        role: turn.role,
+        text: turn.text.trim(),
+        timestamp: turn.timestamp ?? null,
+      }))
+      .filter((turn) => turn.text);
+
+    if (turns.length === 0) {
+      return false;
+    }
+
+    handoffPersistedRef.current = true;
+    setStatusText('Saving call handoff to chat...');
+
+    const response = await backendApi.post<VapiHandoffResponse>(
+      `/vapi/web/handoff/${threadId}`,
+      {
+        turns,
+        call_id: callIdRef.current,
+        agent_id: selectedAgentId ?? null,
+        agent_name: activeAgentName,
+      },
+      {
+        showErrors: false,
+        timeout: 30000,
+      }
+    );
+
+    if (response.error) {
+      handoffPersistedRef.current = false;
+      console.error('Failed to persist live voice handoff', response.error);
+      setErrorMessage(response.error.message || 'Could not save the call handoff to chat.');
+      setStatusText('Voice ended, but the handoff could not be saved.');
+      return false;
+    }
+
+    void queryClient.invalidateQueries({ queryKey: threadKeys.messages(threadId) });
+    setStatusText('Call handoff saved to chat.');
+    return true;
+  }, [activeAgentName, queryClient, selectedAgentId, threadId]);
+
   const stopSession = useCallback(async () => {
     if (!vapiRef.current) {
       setConnectionState('idle');
@@ -186,63 +276,12 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       console.warn('Failed to stop Vapi session cleanly', error);
     } finally {
       vapiRef.current = null;
-      persistedKeysRef.current.clear();
       if (mountedRef.current) {
         setConnectionState('idle');
-        setStatusText('Voice session ended.');
         setIsMuted(false);
       }
     }
   }, []);
-
-  const persistTranscript = useCallback(async (turn: PersistableTranscriptTurn, callId?: string | null) => {
-    const transcript = turn.text.trim();
-    const role = turn.role;
-    if (!transcript) {
-      return;
-    }
-
-    const dedupeKey = [
-      callId || 'no-call',
-      role,
-      String(turn.timestamp ?? ''),
-      turn.dedupeSuffix || '',
-      transcript,
-    ].join('::');
-
-    if (persistedKeysRef.current.has(dedupeKey)) {
-      return;
-    }
-    persistedKeysRef.current.add(dedupeKey);
-
-    setTranscriptPreview((current) => [
-      ...current.slice(-5),
-      { role, text: transcript },
-    ]);
-
-    const response = await backendApi.post(
-      `/vapi/web/transcript/${threadId}`,
-      {
-        role,
-        transcript,
-        call_id: callId ?? null,
-        dedupe_key: dedupeKey,
-        timestamp: turn.timestamp ?? null,
-        agent_id: role === 'assistant' ? selectedAgentId ?? null : null,
-      },
-      {
-        showErrors: false,
-        timeout: 15000,
-      }
-    );
-
-    if (response.error) {
-      console.error('Failed to persist live voice transcript turn', response.error);
-      return false;
-    }
-
-    return true;
-  }, [selectedAgentId, threadId]);
 
   const handleVapiMessage = useCallback((message: any) => {
     const type = String(message?.type || '');
@@ -251,28 +290,27 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       setStatusText(`Status: ${message.status}`);
     }
 
+    if (message?.call?.id) {
+      callIdRef.current = message.call.id;
+    }
+
     const turns = extractTranscriptTurns(message);
     if (turns.length === 0) {
       return;
     }
 
-    void (async () => {
-      const results = await Promise.all(
-        turns.map((turn) => persistTranscript(turn, message?.call?.id ?? null))
-      );
-
-      if (results.some(Boolean)) {
-        void queryClient.invalidateQueries({ queryKey: threadKeys.messages(threadId) });
-      }
-    })();
-  }, [extractTranscriptTurns, persistTranscript, queryClient, threadId]);
+    mergeTranscriptTurns(turns);
+  }, [extractTranscriptTurns, mergeTranscriptTurns]);
 
   const startSession = useCallback(async () => {
     setConnectionState('connecting');
     setErrorMessage(null);
     setStatusText('Preparing live voice...');
     setTranscriptPreview([]);
-    persistedKeysRef.current.clear();
+    transcriptTurnsRef.current = [];
+    transcriptKeysRef.current.clear();
+    handoffPersistedRef.current = false;
+    callIdRef.current = null;
 
     const sessionResponse = await backendApi.post<VapiSessionResponse>(
       `/vapi/web/session/${threadId}`,
@@ -307,13 +345,13 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       });
 
       vapi.on('call-end', () => {
-        if (!mountedRef.current) return;
-        vapiRef.current = null;
-        persistedKeysRef.current.clear();
-        void queryClient.invalidateQueries({ queryKey: threadKeys.messages(threadId) });
-        setConnectionState('idle');
-        setIsMuted(false);
-        setStatusText('Voice session ended.');
+        void (async () => {
+          await persistCallHandoff();
+          if (!mountedRef.current) return;
+          vapiRef.current = null;
+          setConnectionState('idle');
+          setIsMuted(false);
+        })();
       });
 
       vapi.on('speech-start', () => {
@@ -364,7 +402,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       setErrorMessage(error?.message || 'Live voice could not initialize.');
       setStatusText('Live voice could not initialize.');
     }
-  }, [handleVapiMessage, isMuted, selectedAgentId, threadId]);
+  }, [handleVapiMessage, isMuted, persistCallHandoff, selectedAgentId, threadId]);
 
   const handleToggleMute = useCallback(() => {
     if (!vapiRef.current || connectionState !== 'connected') {
@@ -416,7 +454,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
           <DialogHeader>
             <DialogTitle>Live voice with {activeAgentName}</DialogTitle>
             <DialogDescription>
-              Talk through ideas in this thread in real time. Final transcript turns are synced back into chat so thread context and memory can pick them up. For heavy research or long-running work, follow up in chat after the call.
+              Talk through ideas in this thread in real time. When the call ends, Mira saves a structured handoff and the full transcript back into chat so the thread can continue cleanly. For heavy research or long-running work, follow up in chat after the call.
             </DialogDescription>
           </DialogHeader>
 

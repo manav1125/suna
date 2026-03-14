@@ -1,9 +1,11 @@
-from typing import Any, Dict, Optional, Literal
+from typing import Any, Dict, Optional, Literal, List
+import json
 
 from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel, Field
 
 from core.endpoints.vapi_webhooks import VapiWebhookHandler
+from core.services.http_client import get_http_client
 from core.utils.auth_utils import AuthorizedThreadAccess, require_thread_write_access
 from core.utils.config import config
 from core.utils.logger import logger
@@ -26,6 +28,19 @@ class VapiWebTranscriptRequest(BaseModel):
     agent_id: Optional[str] = None
 
 
+class VapiWebTranscriptTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=20000)
+    timestamp: Optional[float] = None
+
+
+class VapiWebHandoffRequest(BaseModel):
+    turns: List[VapiWebTranscriptTurn] = Field(default_factory=list)
+    call_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+
+
 def _message_text(content: Any) -> str:
     if isinstance(content, dict):
         return str(content.get("content") or content.get("text") or "").strip()
@@ -40,6 +55,197 @@ def _message_text(content: Any) -> str:
                 parts.append(str(item).strip())
         return " ".join(part for part in parts if part)
     return str(content or "").strip()
+
+
+def _normalize_transcript_turns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized_turns: List[Dict[str, Any]] = []
+    seen = set()
+
+    for turn in turns:
+        role = str(turn.get("role") or "").lower().strip()
+        if role in ("bot", "agent", "model", "system"):
+            role = "assistant"
+        if role not in ("user", "assistant"):
+            continue
+
+        text = (
+            str(turn.get("text") or turn.get("message") or turn.get("content") or turn.get("transcript") or "")
+            .strip()
+        )
+        if not text:
+            continue
+
+        timestamp = turn.get("timestamp")
+        dedupe_key = f"{role}::{timestamp or ''}::{text}"
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        normalized_turns.append(
+            {
+                "role": role,
+                "text": text,
+                "timestamp": timestamp,
+            }
+        )
+
+    return normalized_turns
+
+
+def _format_transcript_for_prompt(turns: List[Dict[str, Any]], agent_name: str) -> str:
+    lines = []
+    for turn in turns:
+        speaker = "User" if turn["role"] == "user" else agent_name
+        lines.append(f"{speaker}: {turn['text']}")
+    return "\n".join(lines)
+
+
+def _strip_code_fences(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+    if cleaned.endswith("```"):
+        cleaned = cleaned.rsplit("\n", 1)[0]
+    return cleaned.strip()
+
+
+def _normalize_bullet_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+async def _fetch_vapi_call_transcript(call_id: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+    if not call_id or not config.VAPI_PRIVATE_KEY:
+        return None
+
+    try:
+        async with get_http_client() as http_client:
+            response = await http_client.get(
+                f"https://api.vapi.ai/call/{call_id}",
+                headers={"Authorization": f"Bearer {config.VAPI_PRIVATE_KEY}"},
+                timeout=20.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        logger.warning(f"Failed to fetch final Vapi call transcript for {call_id}: {exc}")
+        return None
+
+    transcript = payload.get("transcript")
+    if isinstance(transcript, list):
+        normalized = _normalize_transcript_turns(transcript)
+        return normalized or None
+
+    return None
+
+
+async def _generate_voice_handoff_sections(
+    turns: List[Dict[str, Any]],
+    agent_name: str,
+) -> Dict[str, List[str]]:
+    if not turns:
+        return {
+            "summary": [],
+            "decisions": [],
+            "action_items": [],
+            "open_questions": [],
+            "follow_ups": [],
+        }
+
+    transcript_text = _format_transcript_for_prompt(turns, agent_name)
+
+    if not config.OPENAI_API_KEY:
+        return {
+            "summary": ["Voice conversation completed. Review the transcript below and continue in chat for execution-oriented work."],
+            "decisions": [],
+            "action_items": [],
+            "open_questions": [],
+            "follow_ups": [],
+        }
+
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+        response = await client.chat.completions.create(
+            model="gpt-4.1-mini",
+            temperature=0.2,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You turn completed live voice conversations into a high-signal post-call handoff for a text thread. "
+                        "Return strict JSON only with keys: summary, decisions, action_items, open_questions, follow_ups. "
+                        "Each value must be an array of concise bullet strings. "
+                        "Use empty arrays when not applicable. "
+                        "Capture the user's requested follow-up work in follow_ups."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Assistant name: {agent_name}\n"
+                        "Create a post-call handoff from this transcript.\n\n"
+                        f"{transcript_text[:30000]}"
+                    ),
+                },
+            ],
+        )
+        raw_content = response.choices[0].message.content or "{}"
+        parsed = json.loads(_strip_code_fences(raw_content))
+        return {
+            "summary": _normalize_bullet_list(parsed.get("summary")),
+            "decisions": _normalize_bullet_list(parsed.get("decisions")),
+            "action_items": _normalize_bullet_list(parsed.get("action_items")),
+            "open_questions": _normalize_bullet_list(parsed.get("open_questions")),
+            "follow_ups": _normalize_bullet_list(parsed.get("follow_ups")),
+        }
+    except Exception as exc:
+        logger.warning(f"Failed to generate structured voice handoff summary: {exc}")
+        return {
+            "summary": ["Voice conversation completed. Review the transcript below and continue in chat for execution-oriented work."],
+            "decisions": [],
+            "action_items": [],
+            "open_questions": [],
+            "follow_ups": [],
+        }
+
+
+def _build_voice_handoff_markdown(
+    turns: List[Dict[str, Any]],
+    sections: Dict[str, List[str]],
+    agent_name: str,
+) -> str:
+    lines = [
+        f"## Live Voice Handoff with {agent_name}",
+        "",
+        "This call has been converted into a text handoff so you can keep going in chat.",
+        "",
+    ]
+
+    section_map = [
+        ("Summary", sections.get("summary", [])),
+        ("Key Decisions", sections.get("decisions", [])),
+        ("Action Items", sections.get("action_items", [])),
+        ("Open Questions", sections.get("open_questions", [])),
+        ("Suggested Follow-ups", sections.get("follow_ups", [])),
+    ]
+
+    for title, bullets in section_map:
+        if not bullets:
+            continue
+        lines.append(f"### {title}")
+        lines.extend([f"- {bullet}" for bullet in bullets])
+        lines.append("")
+
+    lines.append("### Full Transcript")
+    for turn in turns:
+        speaker = "User" if turn["role"] == "user" else agent_name
+        lines.append(f"**{speaker}:** {turn['text']}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 async def _format_recent_thread_context(thread_id: str, limit: int = 20) -> Optional[str]:
@@ -295,6 +501,74 @@ async def persist_vapi_web_transcript(
             "voice_timestamp": payload.timestamp,
         },
         agent_id=payload.agent_id if payload.role == "assistant" else None,
+    )
+
+    queue_memory_extraction(thread_id, auth.user_id, [message.get("message_id")])
+
+    return {
+        "status": "persisted",
+        "message": message,
+    }
+
+
+@router.post("/vapi/web/handoff/{thread_id}", summary="Persist Vapi Web Post-Call Handoff", operation_id="persist_vapi_web_handoff")
+async def persist_vapi_web_handoff(
+    thread_id: str,
+    payload: VapiWebHandoffRequest,
+    auth: AuthorizedThreadAccess = Depends(require_thread_write_access),
+):
+    from core.memory.background_jobs import queue_memory_extraction
+    from core.services.db import execute_one
+    from core.threads import repo as threads_repo
+
+    normalized_local_turns = _normalize_transcript_turns([turn.model_dump() for turn in payload.turns])
+    final_vapi_turns = await _fetch_vapi_call_transcript(payload.call_id)
+
+    turns = final_vapi_turns if final_vapi_turns and len(final_vapi_turns) >= len(normalized_local_turns) else normalized_local_turns
+    if not turns:
+        raise HTTPException(status_code=400, detail="No transcript turns available for post-call handoff")
+
+    existing = await execute_one(
+        """
+        SELECT message_id
+        FROM messages
+        WHERE thread_id = :thread_id
+          AND metadata->>'voice_source' = 'vapi_web_handoff'
+          AND metadata->>'voice_call_id' = :call_id
+        LIMIT 1
+        """,
+        {
+            "thread_id": thread_id,
+            "call_id": payload.call_id or "",
+        },
+    )
+
+    if existing:
+        return {
+            "status": "duplicate",
+            "message_id": str(existing["message_id"]),
+        }
+
+    agent_name = payload.agent_name or "Mira"
+    sections = await _generate_voice_handoff_sections(turns, agent_name)
+    handoff_markdown = _build_voice_handoff_markdown(turns, sections, agent_name)
+
+    message = await threads_repo.insert_message(
+        thread_id=thread_id,
+        message_type="assistant",
+        content={
+            "role": "assistant",
+            "content": handoff_markdown,
+        },
+        is_llm_message=True,
+        metadata={
+            "voice_source": "vapi_web_handoff",
+            "voice_call_id": payload.call_id,
+            "voice_turn_count": len(turns),
+            "voice_transcript": turns,
+            "voice_handoff_sections": sections,
+        },
+        agent_id=payload.agent_id,
     )
 
     queue_memory_extraction(thread_id, auth.user_id, [message.get("message_id")])
