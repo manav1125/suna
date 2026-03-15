@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional, Literal, List
 import json
+import re
 
 from fastapi import APIRouter, Request, HTTPException, Depends
 from pydantic import BaseModel, Field
@@ -57,9 +58,30 @@ def _message_text(content: Any) -> str:
     return str(content or "").strip()
 
 
+def _normalize_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _canonicalize_transcript_text(text: str) -> str:
+    normalized = _normalize_whitespace(text).lower()
+    normalized = re.sub(r"[.,!?;:()\[\]{}\"'`]", "", normalized)
+    return normalized.strip()
+
+
+def _looks_like_expansion(previous: str, current: str) -> bool:
+    if not previous or not current:
+        return False
+
+    left = _canonicalize_transcript_text(previous)
+    right = _canonicalize_transcript_text(current)
+    if not left or not right:
+        return False
+
+    return left == right or right.startswith(left) or left.startswith(right)
+
+
 def _normalize_transcript_turns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     normalized_turns: List[Dict[str, Any]] = []
-    seen = set()
 
     for turn in turns:
         role = str(turn.get("role") or "").lower().strip()
@@ -68,26 +90,41 @@ def _normalize_transcript_turns(turns: List[Dict[str, Any]]) -> List[Dict[str, A
         if role not in ("user", "assistant"):
             continue
 
-        text = (
+        text = _normalize_whitespace(
             str(turn.get("text") or turn.get("message") or turn.get("content") or turn.get("transcript") or "")
-            .strip()
         )
         if not text:
             continue
 
         timestamp = turn.get("timestamp")
-        dedupe_key = f"{role}::{timestamp or ''}::{text}"
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
+        current_turn = {
+            "role": role,
+            "text": text,
+            "timestamp": timestamp,
+        }
 
-        normalized_turns.append(
-            {
-                "role": role,
-                "text": text,
-                "timestamp": timestamp,
-            }
-        )
+        last_turn = normalized_turns[-1] if normalized_turns else None
+        if last_turn and last_turn["role"] == role and _looks_like_expansion(last_turn["text"], text):
+            if len(text) > len(last_turn["text"]):
+                normalized_turns[-1] = current_turn
+            continue
+
+        previous_turn = normalized_turns[-2] if len(normalized_turns) >= 2 else None
+        if (
+            previous_turn
+            and last_turn
+            and previous_turn["role"] == role
+            and last_turn["role"] != role
+            and _looks_like_expansion(previous_turn["text"], text)
+        ):
+            if len(text) > len(previous_turn["text"]):
+                normalized_turns[-2] = current_turn
+            continue
+
+        if last_turn and last_turn["role"] == role and _canonicalize_transcript_text(last_turn["text"]) == _canonicalize_transcript_text(text):
+            continue
+
+        normalized_turns.append(current_turn)
 
     return normalized_turns
 
@@ -132,7 +169,11 @@ async def _fetch_vapi_call_transcript(call_id: Optional[str]) -> Optional[List[D
         logger.warning(f"Failed to fetch final Vapi call transcript for {call_id}: {exc}")
         return None
 
-    transcript = payload.get("transcript")
+    transcript = (
+        payload.get("artifact", {}).get("transcript")
+        or payload.get("artifact", {}).get("messages")
+        or payload.get("transcript")
+    )
     if isinstance(transcript, list):
         normalized = _normalize_transcript_turns(transcript)
         return normalized or None
@@ -221,6 +262,7 @@ def _build_voice_handoff_markdown(
         f"## Live Voice Handoff with {agent_name}",
         "",
         "This call has been converted into a text handoff so you can keep going in chat.",
+        "Reply below to continue the conversation, ask Mira to turn this into work, or refine any of the points from the call.",
         "",
     ]
 
@@ -324,7 +366,7 @@ async def _build_voice_system_prompt(thread_id: str, user_id: str, agent_id: Opt
     base_prompt = (
         "You are Mira, an AI coach, guide, and operator for founders and investors. "
         "Be thoughtful, strategic, and collaborative. In live voice mode, sound natural and conversational. "
-        "Give direct answers, ask clarifying questions when needed, and keep most spoken turns to one to three sentences. "
+        "Keep most spoken turns to one or two short sentences unless the user explicitly asks for depth. "
         "You are continuing the same thread the user is currently looking at, so use the existing thread context and memory below instead of acting like this is a brand-new conversation."
     )
 
@@ -344,13 +386,17 @@ async def _build_voice_system_prompt(thread_id: str, user_id: str, agent_id: Opt
         base_prompt,
         "",
         "LIVE VOICE MODE BEHAVIOR:",
-        "- Speak like a supportive, highly capable teammate, not a chatbot reading a memo.",
+        "- Speak like a calm, supportive teammate, not a menu system or intake bot.",
         "- Treat the thread context and relevant memory below as active context for this live conversation.",
+        "- Let the user finish speaking. Do not interrupt them with rapid-fire suggestions or option lists.",
+        "- Ask at most one short clarifying question when needed. Do not keep piling on follow-up prompts.",
+        "- If the user says stop, wait, hold on, or let me speak, apologize briefly and then listen.",
         "- Keep answers crisp unless the user explicitly asks you to go deeper.",
         "- If you do not know something yet, say so and suggest the next best step.",
         "- Do not claim that you searched, opened files, or completed actions unless that actually happened.",
         "- Do not promise background work, research runs, or thread actions after the call unless the product actually triggered them.",
-        "- If the user wants a detailed report, strategy memo, deck, or proposal, explain that live voice is best for discussion and they should send or confirm the request in chat after the call for full execution.",
+        "- If the user wants a detailed report, strategy memo, deck, or proposal, explain briefly that live voice is best for discussion and they can continue in chat after the call for full execution.",
+        "- Avoid repetitive openers like 'ask', 'how can I help today', or long lists of possible things the user could do.",
     ]
 
     if memory_context:
@@ -370,7 +416,7 @@ def _build_transient_assistant(prompt: str, agent_name: str) -> Dict[str, Any]:
         "firstMessageMode": "assistant-waits-for-user",
         "maxDurationSeconds": 1800,
         "backgroundSound": "off",
-        "modelOutputInMessagesEnabled": True,
+        "modelOutputInMessagesEnabled": False,
         "model": {
             "provider": "openai",
             "model": "gpt-4.1-mini",
@@ -384,6 +430,12 @@ def _build_transient_assistant(prompt: str, agent_name: str) -> Dict[str, Any]:
         "voice": {
             "provider": "vapi",
             "voiceId": "Hana",
+        },
+        "transcriber": {
+            "provider": "deepgram",
+            "model": "nova-3",
+            "language": "en",
+            "disablePartialTranscripts": True,
         },
         "metadata": {
             "agentName": agent_name,
@@ -524,7 +576,7 @@ async def persist_vapi_web_handoff(
     normalized_local_turns = _normalize_transcript_turns([turn.model_dump() for turn in payload.turns])
     final_vapi_turns = await _fetch_vapi_call_transcript(payload.call_id)
 
-    turns = final_vapi_turns if final_vapi_turns and len(final_vapi_turns) >= len(normalized_local_turns) else normalized_local_turns
+    turns = final_vapi_turns or normalized_local_turns
     if not turns:
         raise HTTPException(status_code=400, detail="No transcript turns available for post-call handoff")
 

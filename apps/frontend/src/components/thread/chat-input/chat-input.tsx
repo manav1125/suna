@@ -1559,11 +1559,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
           />
         )}
 
-        {isLoggedIn && threadId && (
+        {isLoggedIn && (
           <LiveVoiceButton
             threadId={threadId}
+            projectId={projectId}
             selectedAgentId={selectedAgentId}
             disabled={loading || disabled || isUploading || isAgentRunning}
+            variant={threadId ? 'icon' : 'pill'}
           />
         )}
 
@@ -1585,7 +1587,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandles, ChatInputProps>(
           pendingFilesCount={pendingFilesCount}
         />
       </div>
-    ), [isLoggedIn, loading, disabled, handleTranscription, isAgentRunning, hasContent, hasFiles, isUploading, onStopAgent, handleSubmit, buttonLoaderVariant, pendingFilesCount, hideAgentSelection, selectedAgentId, onAgentSelect, threadId]);
+    ), [isLoggedIn, loading, disabled, handleTranscription, isAgentRunning, hasContent, hasFiles, isUploading, onStopAgent, handleSubmit, buttonLoaderVariant, pendingFilesCount, hideAgentSelection, selectedAgentId, onAgentSelect, threadId, projectId]);
 
     const renderControls = useMemo(() => (
       <div className="flex items-center justify-between mt-0 mb-1 px-1.5 sm:px-2 gap-1 sm:gap-1.5">

@@ -1,16 +1,27 @@
 'use client';
 
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
-import { AudioLines, Loader2, MicOff, PhoneOff, PhoneOutgoing } from 'lucide-react';
+import {
+  AudioLines,
+  Loader2,
+  MicOff,
+  PhoneOff,
+  PhoneOutgoing,
+  Radio,
+  Sparkles,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { backendApi } from '@/lib/api-client';
+import { createThread } from '@/lib/api/threads';
 import { threadKeys } from '@/hooks/threads/keys';
+import { toast } from '@/lib/toast';
 
-type ConnectionState = 'idle' | 'connecting' | 'connected' | 'error';
+type ConnectionState = 'idle' | 'connecting' | 'connected' | 'ending' | 'error';
 
 interface TranscriptPreview {
   role: 'user' | 'assistant';
@@ -21,7 +32,6 @@ interface PersistableTranscriptTurn {
   role: 'user' | 'assistant';
   text: string;
   timestamp?: number | null;
-  dedupeSuffix?: string;
 }
 
 interface VapiSessionResponse {
@@ -41,31 +51,125 @@ interface VapiHandoffResponse {
 }
 
 interface LiveVoiceButtonProps {
-  threadId: string;
+  threadId?: string | null;
+  projectId?: string;
   selectedAgentId?: string;
   disabled?: boolean;
+  variant?: 'icon' | 'pill';
+}
+
+const MAX_PREVIEW_TURNS = 8;
+
+function normalizeWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function canonicalizeText(text: string): string {
+  return normalizeWhitespace(text)
+    .toLowerCase()
+    .replace(/[.,!?;:()[\]{}"']/g, '')
+    .trim();
+}
+
+function looksLikeExpansion(previous: string, next: string): boolean {
+  if (!previous || !next) return false;
+  const a = canonicalizeText(previous);
+  const b = canonicalizeText(next);
+  if (!a || !b) return false;
+  return a === b || b.startsWith(a) || a.startsWith(b);
+}
+
+function richerText(a: string, b: string): string {
+  const left = normalizeWhitespace(a);
+  const right = normalizeWhitespace(b);
+  return right.length >= left.length ? right : left;
+}
+
+function mergeTranscriptTurns(
+  currentTurns: PersistableTranscriptTurn[],
+  incomingTurns: PersistableTranscriptTurn[],
+): PersistableTranscriptTurn[] {
+  const merged = [...currentTurns];
+
+  for (const incoming of incomingTurns) {
+    const text = normalizeWhitespace(incoming.text);
+    if (!text) continue;
+
+    const normalizedTurn: PersistableTranscriptTurn = {
+      role: incoming.role,
+      text,
+      timestamp: incoming.timestamp ?? null,
+    };
+
+    const last = merged[merged.length - 1];
+    if (
+      last &&
+      last.role === normalizedTurn.role &&
+      looksLikeExpansion(last.text, normalizedTurn.text)
+    ) {
+      merged[merged.length - 1] = {
+        ...last,
+        text: richerText(last.text, normalizedTurn.text),
+        timestamp: normalizedTurn.timestamp ?? last.timestamp ?? null,
+      };
+      continue;
+    }
+
+    const previous = merged[merged.length - 2];
+    if (
+      previous &&
+      previous.role === normalizedTurn.role &&
+      looksLikeExpansion(previous.text, normalizedTurn.text) &&
+      last &&
+      last.role !== normalizedTurn.role
+    ) {
+      merged[merged.length - 2] = {
+        ...previous,
+        text: richerText(previous.text, normalizedTurn.text),
+        timestamp: normalizedTurn.timestamp ?? previous.timestamp ?? null,
+      };
+      continue;
+    }
+
+    if (last && last.role === normalizedTurn.role && canonicalizeText(last.text) === canonicalizeText(normalizedTurn.text)) {
+      continue;
+    }
+
+    merged.push(normalizedTurn);
+  }
+
+  return merged;
 }
 
 export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function LiveVoiceButton({
   threadId,
+  projectId,
   selectedAgentId,
   disabled = false,
+  variant = 'icon',
 }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+
   const [open, setOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [statusText, setStatusText] = useState('Ready to start a live conversation.');
   const [isMuted, setIsMuted] = useState(false);
   const [transcriptPreview, setTranscriptPreview] = useState<TranscriptPreview[]>([]);
-  const [activeAgentName, setActiveAgentName] = useState<string>('Mira');
+  const [activeAgentName, setActiveAgentName] = useState('Mira');
+  const [handoffSaved, setHandoffSaved] = useState(false);
+  const [isPreparingThread, setIsPreparingThread] = useState(false);
 
   const vapiRef = useRef<any>(null);
   const transcriptTurnsRef = useRef<PersistableTranscriptTurn[]>([]);
-  const transcriptKeysRef = useRef<Set<string>>(new Set());
   const handoffPersistedRef = useRef(false);
   const callIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  const pendingAutoStartRef = useRef(false);
+  const autoStartConsumedRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -81,8 +185,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
   }, []);
 
   const normalizeRole = useCallback((value: unknown): 'user' | 'assistant' | null => {
-    const normalized = String(value || '').toLowerCase();
-    if (!normalized) return null;
+    const normalized = String(value || '').toLowerCase().trim();
     if (normalized === 'user') return 'user';
     if (['assistant', 'bot', 'agent', 'model', 'system'].includes(normalized)) return 'assistant';
     return null;
@@ -90,13 +193,14 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
 
   const extractText = useCallback((value: unknown): string => {
     if (!value) return '';
-    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'string') return normalizeWhitespace(value);
     if (Array.isArray(value)) {
-      return value
-        .map((item) => extractText(item))
-        .filter(Boolean)
-        .join(' ')
-        .trim();
+      return normalizeWhitespace(
+        value
+          .map((item) => extractText(item))
+          .filter(Boolean)
+          .join(' ')
+      );
     }
     if (typeof value === 'object') {
       const record = value as Record<string, unknown>;
@@ -106,135 +210,72 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
         extractText(record.message) ||
         extractText(record.content) ||
         ''
-      ).trim();
+      );
     }
-    return String(value).trim();
+    return normalizeWhitespace(String(value));
   }, []);
 
   const extractTranscriptTurns = useCallback((message: any): PersistableTranscriptTurn[] => {
-    const turns: PersistableTranscriptTurn[] = [];
-    const seen = new Set<string>();
     const type = String(message?.type || '').toLowerCase();
-
-    const pushTurn = (
-      roleValue: unknown,
-      textValue: unknown,
-      timestamp?: number | null,
-      dedupeSuffix?: string
-    ) => {
-      const role = normalizeRole(roleValue);
-      const text = extractText(textValue);
-      if (!role || !text) return;
-
-      const localKey = `${role}::${timestamp ?? ''}::${dedupeSuffix ?? ''}::${text}`;
-      if (seen.has(localKey)) return;
-      seen.add(localKey);
-
-      turns.push({ role, text, timestamp: timestamp ?? null, dedupeSuffix });
-    };
-
-    const directTranscriptType = String(
+    const transcriptType = String(
       message?.transcriptType ||
-      message?.transcript?.type ||
-      message?.message?.transcriptType ||
-      ''
+        message?.transcript?.type ||
+        message?.message?.transcriptType ||
+        ''
     ).toLowerCase();
-    const isDirectTranscriptEvent =
-      type.includes('transcript') ||
-      Boolean(message?.transcript) ||
-      Boolean(message?.message?.transcript);
-    const looksFinalDirectTurn =
-      !directTranscriptType || directTranscriptType === 'final' || type.includes('final');
 
-    if (isDirectTranscriptEvent && looksFinalDirectTurn) {
-      pushTurn(
-        message?.role ?? message?.speaker ?? message?.from,
-        message?.transcript ?? message?.message?.transcript ?? message?.content ?? message?.message,
-        message?.timestamp ?? null,
-        'direct'
-      );
+    if (!type.includes('transcript')) {
+      return [];
     }
 
-    const collections = [
-      message?.conversation,
-      message?.messages,
-      message?.artifact?.messages,
-      message?.message?.conversation,
-      message?.message?.messages,
-      message?.message?.artifact?.messages,
-    ].filter(Array.isArray) as Array<any[]>;
+    if (transcriptType && transcriptType !== 'final') {
+      return [];
+    }
 
-    collections.forEach((collection, collectionIndex) => {
-      collection.forEach((item, itemIndex) => {
-        const itemTranscriptType = String(
-          item?.transcriptType || item?.transcript?.type || ''
-        ).toLowerCase();
-        const shouldSkipInterim = itemTranscriptType && itemTranscriptType !== 'final';
-        if (shouldSkipInterim) return;
+    const role = normalizeRole(message?.role ?? message?.speaker ?? message?.from);
+    const text = extractText(
+      message?.transcript ??
+        message?.message?.transcript ??
+        message?.content ??
+        message?.message
+    );
 
-        pushTurn(
-          item?.role ?? item?.speaker ?? item?.from,
-          item?.transcript ?? item?.message ?? item?.content ?? item?.text,
-          item?.timestamp ?? item?.time ?? message?.timestamp ?? null,
-          `collection-${collectionIndex}-${itemIndex}`
-        );
-      });
-    });
+    if (!role || !text) {
+      return [];
+    }
 
-    return turns;
+    return [
+      {
+        role,
+        text,
+        timestamp: message?.timestamp ?? null,
+      },
+    ];
   }, [extractText, normalizeRole]);
 
-  const buildTurnKey = useCallback((turn: PersistableTranscriptTurn) => {
-    return [turn.role, turn.timestamp ?? '', turn.text.trim()].join('::');
+  const refreshPreview = useCallback(() => {
+    setTranscriptPreview(transcriptTurnsRef.current.slice(-MAX_PREVIEW_TURNS));
   }, []);
 
-  const mergeTranscriptTurns = useCallback((turns: PersistableTranscriptTurn[]) => {
-    let changed = false;
-
-    for (const turn of turns) {
-      const text = turn.text.trim();
-      if (!text) continue;
-
-      const normalizedTurn = {
-        role: turn.role,
-        text,
-        timestamp: turn.timestamp ?? null,
-      };
-
-      const key = buildTurnKey(normalizedTurn);
-      if (transcriptKeysRef.current.has(key)) {
-        continue;
-      }
-
-      transcriptKeysRef.current.add(key);
-      transcriptTurnsRef.current.push(normalizedTurn);
-      changed = true;
-    }
-
-    if (changed) {
-      setTranscriptPreview(transcriptTurnsRef.current.slice(-8));
-    }
-  }, [buildTurnKey]);
-
   const persistCallHandoff = useCallback(async () => {
-    if (handoffPersistedRef.current) {
+    if (handoffPersistedRef.current || !threadId) {
       return true;
     }
 
     const turns = transcriptTurnsRef.current
       .map((turn) => ({
         role: turn.role,
-        text: turn.text.trim(),
+        text: normalizeWhitespace(turn.text),
         timestamp: turn.timestamp ?? null,
       }))
       .filter((turn) => turn.text);
 
-    if (turns.length === 0) {
+    if (turns.length === 0 && !callIdRef.current) {
       return false;
     }
 
     handoffPersistedRef.current = true;
-    setStatusText('Saving call handoff to chat...');
+    setStatusText('Saving your call handoff to chat...');
 
     const response = await backendApi.post<VapiHandoffResponse>(
       `/vapi/web/handoff/${threadId}`,
@@ -258,8 +299,9 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       return false;
     }
 
+    setHandoffSaved(true);
+    setStatusText('Call saved to chat. You can keep going in text below.');
     void queryClient.invalidateQueries({ queryKey: threadKeys.messages(threadId) });
-    setStatusText('Call handoff saved to chat.');
     return true;
   }, [activeAgentName, queryClient, selectedAgentId, threadId]);
 
@@ -270,6 +312,9 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       return;
     }
 
+    setConnectionState('ending');
+    setStatusText('Ending voice conversation...');
+
     try {
       await vapiRef.current.stop();
     } catch (error) {
@@ -277,14 +322,13 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
     } finally {
       vapiRef.current = null;
       if (mountedRef.current) {
-        setConnectionState('idle');
         setIsMuted(false);
       }
     }
   }, []);
 
   const handleVapiMessage = useCallback((message: any) => {
-    const type = String(message?.type || '');
+    const type = String(message?.type || '').toLowerCase();
 
     if (type === 'status-update' && message?.status) {
       setStatusText(`Status: ${message.status}`);
@@ -299,16 +343,21 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       return;
     }
 
-    mergeTranscriptTurns(turns);
-  }, [extractTranscriptTurns, mergeTranscriptTurns]);
+    transcriptTurnsRef.current = mergeTranscriptTurns(transcriptTurnsRef.current, turns);
+    refreshPreview();
+  }, [extractTranscriptTurns, refreshPreview]);
 
   const startSession = useCallback(async () => {
+    if (!threadId) {
+      return;
+    }
+
     setConnectionState('connecting');
     setErrorMessage(null);
+    setHandoffSaved(false);
     setStatusText('Preparing live voice...');
     setTranscriptPreview([]);
     transcriptTurnsRef.current = [];
-    transcriptKeysRef.current.clear();
     handoffPersistedRef.current = false;
     callIdRef.current = null;
 
@@ -341,16 +390,19 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       vapi.on('call-start', () => {
         if (!mountedRef.current) return;
         setConnectionState('connected');
-        setStatusText(`Live with ${sessionResponse.data?.agent_name || 'Mira'}.`);
+        setStatusText('Listening...');
       });
 
       vapi.on('call-end', () => {
         void (async () => {
-          await persistCallHandoff();
+          const persisted = await persistCallHandoff();
           if (!mountedRef.current) return;
           vapiRef.current = null;
           setConnectionState('idle');
           setIsMuted(false);
+          if (!persisted) {
+            setStatusText('Voice ended.');
+          }
         })();
       });
 
@@ -404,6 +456,34 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
     }
   }, [handleVapiMessage, isMuted, persistCallHandoff, selectedAgentId, threadId]);
 
+  useEffect(() => {
+    if (!threadId || autoStartConsumedRef.current) {
+      return;
+    }
+
+    if (searchParams?.get('voiceStart') !== '1') {
+      return;
+    }
+
+    autoStartConsumedRef.current = true;
+    pendingAutoStartRef.current = true;
+    setOpen(true);
+
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('voiceStart');
+    const nextUrl = nextParams.size ? `${pathname}?${nextParams.toString()}` : pathname;
+    router.replace(nextUrl, { scroll: false });
+  }, [pathname, router, searchParams, threadId]);
+
+  useEffect(() => {
+    if (!open || !pendingAutoStartRef.current || connectionState !== 'idle' || !threadId) {
+      return;
+    }
+
+    pendingAutoStartRef.current = false;
+    void startSession();
+  }, [connectionState, open, startSession, threadId]);
+
   const handleToggleMute = useCallback(() => {
     if (!vapiRef.current || connectionState !== 'connected') {
       return;
@@ -415,29 +495,85 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
     setStatusText(nextMuted ? 'Muted' : 'Listening...');
   }, [connectionState, isMuted]);
 
-  const buttonLabel = useMemo(() => {
-    if (connectionState === 'connecting') return 'Connecting voice';
-    if (connectionState === 'connected') return 'End live voice';
-    return 'Start live voice';
-  }, [connectionState]);
+  const handleOpenVoice = useCallback(async () => {
+    if (disabled || isPreparingThread) {
+      return;
+    }
+
+    setErrorMessage(null);
+
+    if (threadId) {
+      setOpen(true);
+      return;
+    }
+
+    try {
+      setIsPreparingThread(true);
+      const newThread = await createThread(projectId);
+      const nextUrl = newThread.project_id
+        ? `/projects/${newThread.project_id}/thread/${newThread.thread_id}?voiceStart=1`
+        : `/thread/${newThread.thread_id}?voiceStart=1`;
+      toast.success('Preparing your voice conversation...');
+      router.push(nextUrl);
+    } catch (error: any) {
+      console.error('Failed to create a voice thread', error);
+      const detail = error?.message || 'Could not create a new voice conversation.';
+      setErrorMessage(detail);
+      toast.error(detail);
+    } finally {
+      if (mountedRef.current) {
+        setIsPreparingThread(false);
+      }
+    }
+  }, [disabled, isPreparingThread, projectId, router, threadId]);
+
+  const renderButton = () => {
+    const commonProps = {
+      type: 'button' as const,
+      disabled: disabled || isPreparingThread,
+      onClick: () => void handleOpenVoice(),
+    };
+
+    if (variant === 'pill') {
+      return (
+        <Button
+          {...commonProps}
+          variant="outline"
+          size="sm"
+          className="h-10 rounded-2xl border-border/70 bg-background/90 px-4 text-sm font-medium text-foreground shadow-sm hover:bg-accent/60"
+        >
+          {isPreparingThread ? (
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          ) : (
+            <Radio className="mr-2 h-4 w-4" />
+          )}
+          Try voice mode
+        </Button>
+      );
+    }
+
+    return (
+      <Button
+        {...commonProps}
+        variant="ghost"
+        size="sm"
+        className="h-10 rounded-2xl border-[1.5px] border-border bg-transparent px-2 py-2 text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+      >
+        {isPreparingThread ? (
+          <Loader2 className="h-5 w-5 animate-spin" />
+        ) : (
+          <AudioLines className="h-5 w-5" />
+        )}
+      </Button>
+    );
+  };
 
   return (
     <>
       <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={disabled}
-            onClick={() => setOpen(true)}
-            className="h-10 px-2 py-2 bg-transparent border-[1.5px] border-border rounded-2xl text-muted-foreground hover:text-foreground hover:bg-accent/50 flex items-center gap-2 transition-colors"
-          >
-            <AudioLines className="h-5 w-5" />
-          </Button>
-        </TooltipTrigger>
+        <TooltipTrigger asChild>{renderButton()}</TooltipTrigger>
         <TooltipContent side="top" className="text-xs">
-          <p>Live voice with Mira</p>
+          <p>{threadId ? 'Live voice with Mira' : 'Start a new voice conversation'}</p>
         </TooltipContent>
       </Tooltip>
 
@@ -445,94 +581,183 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
         open={open}
         onOpenChange={(nextOpen) => {
           setOpen(nextOpen);
-          if (!nextOpen && (connectionState === 'connected' || connectionState === 'connecting')) {
+          if (!nextOpen && (connectionState === 'connected' || connectionState === 'connecting' || connectionState === 'ending')) {
             void stopSession();
           }
         }}
       >
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Live voice with {activeAgentName}</DialogTitle>
-            <DialogDescription>
-              Talk through ideas in this thread in real time. When the call ends, Mira saves a structured handoff and the full transcript back into chat so the thread can continue cleanly. For heavy research or long-running work, follow up in chat after the call.
-            </DialogDescription>
-          </DialogHeader>
+        <DialogContent className="overflow-hidden border-none bg-transparent p-0 shadow-none sm:max-w-2xl">
+          <div className="relative overflow-hidden rounded-[32px] border border-white/10 bg-[#060913] text-white shadow-[0_40px_120px_rgba(6,9,19,0.55)]">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(109,114,255,0.20),transparent_38%),radial-gradient(circle_at_bottom,rgba(0,212,255,0.15),transparent_36%)]" />
+            <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.05),transparent_40%,transparent_60%,rgba(255,255,255,0.03))]" />
 
-          <div className="space-y-4">
-            <div className="rounded-2xl border border-border/60 bg-muted/30 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium">Status</p>
-                  <p className="text-sm text-muted-foreground">{statusText}</p>
-                </div>
-                {connectionState === 'connecting' ? (
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                ) : (
+            <DialogHeader className="relative px-8 pb-0 pt-8">
+              <DialogTitle className="text-4xl font-semibold tracking-tight text-white">
+                Live voice with {activeAgentName}
+              </DialogTitle>
+              <DialogDescription className="mt-3 max-w-2xl text-lg leading-8 text-white/72">
+                Talk through ideas in real time. When the call ends, Mira saves one clean handoff into chat so you can keep going in text without the transcript clutter.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="relative px-8 pb-8 pt-6">
+              <div className="mb-6 flex items-center justify-center">
+                <div className="relative flex h-40 w-40 items-center justify-center">
                   <div
-                    className={`h-3 w-3 rounded-full ${
-                      connectionState === 'connected'
-                        ? 'bg-emerald-500'
-                        : connectionState === 'error'
-                          ? 'bg-destructive'
-                          : 'bg-muted-foreground/40'
+                    className={`absolute inset-0 rounded-full bg-cyan-400/20 blur-3xl ${
+                      connectionState === 'connected' ? 'animate-pulse' : ''
                     }`}
                   />
-                )}
+                  <div className="absolute inset-2 rounded-full border border-cyan-300/20" />
+                  <div className="absolute inset-6 rounded-full border border-cyan-200/15" />
+                  <div className="absolute inset-10 rounded-full border border-white/10" />
+                  <div className="absolute inset-[34px] rounded-full bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.18),rgba(84,111,255,0.12),rgba(6,9,19,0.9))]" />
+                  <div className="relative flex h-16 w-16 items-center justify-center rounded-full border border-white/15 bg-white/6 backdrop-blur-md">
+                    {connectionState === 'connecting' || isPreparingThread ? (
+                      <Loader2 className="h-7 w-7 animate-spin text-cyan-200" />
+                    ) : connectionState === 'connected' ? (
+                      <AudioLines className="h-7 w-7 text-cyan-100" />
+                    ) : handoffSaved ? (
+                      <Sparkles className="h-7 w-7 text-cyan-100" />
+                    ) : (
+                      <Radio className="h-7 w-7 text-cyan-100" />
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
 
-            {errorMessage && (
-              <div className="rounded-2xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-                {errorMessage}
+              <div className="mb-6 rounded-[28px] border border-white/10 bg-white/[0.05] p-5 backdrop-blur-xl">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium uppercase tracking-[0.18em] text-white/45">Status</p>
+                    <p className="mt-2 text-2xl font-medium text-white">{statusText}</p>
+                  </div>
+                  {connectionState === 'connecting' || connectionState === 'ending' ? (
+                    <Loader2 className="h-6 w-6 animate-spin text-cyan-200" />
+                  ) : (
+                    <div
+                      className={`h-4 w-4 rounded-full ${
+                        connectionState === 'connected'
+                          ? 'bg-emerald-400 shadow-[0_0_24px_rgba(74,222,128,0.8)]'
+                          : connectionState === 'error'
+                            ? 'bg-rose-400 shadow-[0_0_24px_rgba(251,113,133,0.75)]'
+                            : handoffSaved
+                              ? 'bg-cyan-300 shadow-[0_0_24px_rgba(125,211,252,0.8)]'
+                              : 'bg-white/25'
+                      }`}
+                    />
+                  )}
+                </div>
+                <div className="mt-4 flex items-end justify-center gap-2">
+                  {Array.from({ length: 12 }).map((_, index) => {
+                    const active = connectionState === 'connected';
+                    const height = active ? 18 + ((index * 7) % 24) : 8 + ((index * 3) % 8);
+                    return (
+                      <div
+                        key={index}
+                        className={`w-1.5 rounded-full ${
+                          active ? 'animate-pulse bg-cyan-300/85' : 'bg-white/20'
+                        }`}
+                        style={{
+                          height,
+                          animationDelay: `${index * 90}ms`,
+                          animationDuration: `${900 + index * 30}ms`,
+                        }}
+                      />
+                    );
+                  })}
+                </div>
               </div>
-            )}
 
-            <div className="flex flex-wrap items-center gap-2">
-              {connectionState === 'connected' ? (
-                <>
-                  <Button type="button" onClick={() => void stopSession()} className="gap-2">
-                    <PhoneOff className="h-4 w-4" />
-                    End voice
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={handleToggleMute}
-                    className="gap-2"
-                  >
-                    <MicOff className="h-4 w-4" />
-                    {isMuted ? 'Unmute' : 'Mute'}
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  type="button"
-                  onClick={() => void startSession()}
-                  disabled={connectionState === 'connecting'}
-                  className="gap-2"
-                >
-                  <PhoneOutgoing className="h-4 w-4" />
-                  {buttonLabel}
-                </Button>
-              )}
-            </div>
-
-            <div className="rounded-2xl border border-border/60 bg-background p-4">
-              <p className="mb-2 text-sm font-medium">Recent transcript</p>
-              {transcriptPreview.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  Once you start talking, the latest user and assistant turns will show up here.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {transcriptPreview.map((turn, index) => (
-                    <div key={`${turn.role}-${index}`} className="text-sm">
-                      <span className="font-medium capitalize">{turn.role}:</span>{' '}
-                      <span className="text-muted-foreground">{turn.text}</span>
-                    </div>
-                  ))}
+              {errorMessage && (
+                <div className="mb-6 rounded-[24px] border border-rose-400/30 bg-rose-400/10 p-4 text-sm text-rose-100">
+                  {errorMessage}
                 </div>
               )}
+
+              {handoffSaved && connectionState === 'idle' && (
+                <div className="mb-6 rounded-[24px] border border-emerald-400/25 bg-emerald-400/10 p-5">
+                  <p className="text-lg font-medium text-white">Call saved cleanly</p>
+                  <p className="mt-2 text-sm leading-6 text-white/72">
+                    Mira added one structured handoff into this thread. Continue typing below to turn the conversation into work.
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <Button
+                      type="button"
+                      onClick={() => setOpen(false)}
+                      className="rounded-2xl bg-white px-4 text-black hover:bg-white/90"
+                    >
+                      Continue in chat
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => void startSession()}
+                      className="rounded-2xl border-white/15 bg-transparent text-white hover:bg-white/8"
+                    >
+                      Start another voice chat
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              <div className="mb-6 flex flex-wrap items-center gap-3">
+                {connectionState === 'connected' || connectionState === 'ending' ? (
+                  <>
+                    <Button
+                      type="button"
+                      onClick={() => void stopSession()}
+                      disabled={connectionState === 'ending'}
+                      className="gap-2 rounded-2xl bg-white px-5 text-black hover:bg-white/90"
+                    >
+                      <PhoneOff className="h-4 w-4" />
+                      End voice
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleToggleMute}
+                      className="gap-2 rounded-2xl border-white/15 bg-transparent px-5 text-white hover:bg-white/8"
+                    >
+                      <MicOff className="h-4 w-4" />
+                      {isMuted ? 'Unmute' : 'Mute'}
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    type="button"
+                    onClick={() => void startSession()}
+                    disabled={connectionState === 'connecting' || !threadId}
+                    className="gap-2 rounded-2xl bg-white px-5 text-black hover:bg-white/90"
+                  >
+                    <PhoneOutgoing className="h-4 w-4" />
+                    {connectionState === 'connecting' ? 'Connecting…' : 'Start live voice'}
+                  </Button>
+                )}
+              </div>
+
+              <div className="rounded-[28px] border border-white/10 bg-white/[0.04] p-5 backdrop-blur-xl">
+                <p className="mb-3 text-sm font-medium uppercase tracking-[0.18em] text-white/45">
+                  Recent transcript
+                </p>
+                {transcriptPreview.length === 0 ? (
+                  <p className="text-sm leading-7 text-white/62">
+                    Your latest user and assistant turns will appear here while the call is active. The thread stays clean until the final handoff is saved.
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {transcriptPreview.map((turn, index) => (
+                      <div
+                        key={`${turn.role}-${index}`}
+                        className="rounded-2xl border border-white/8 bg-black/10 px-4 py-3 text-sm"
+                      >
+                        <span className="font-medium capitalize text-white">{turn.role}:</span>{' '}
+                        <span className="text-white/72">{turn.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </DialogContent>
