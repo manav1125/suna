@@ -80,6 +80,32 @@ def _looks_like_expansion(previous: str, current: str) -> bool:
     return left == right or right.startswith(left) or left.startswith(right)
 
 
+def _looks_like_equivalent(previous: str, current: str) -> bool:
+    return (
+        _looks_like_expansion(previous, current)
+        or _canonicalize_transcript_text(previous) == _canonicalize_transcript_text(current)
+    )
+
+
+def _extract_voice_role_hint(description: Optional[str], system_prompt: Optional[str]) -> str:
+    description_text = _normalize_whitespace(description or "")
+    if description_text:
+        return description_text[:320]
+
+    if not system_prompt:
+        return ""
+
+    for raw_line in str(system_prompt).splitlines():
+        line = _normalize_whitespace(raw_line)
+        if not line:
+            continue
+        if line.startswith(("#", "-", "*")):
+            continue
+        return line[:320]
+
+    return ""
+
+
 def _normalize_transcript_turns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     normalized_turns: List[Dict[str, Any]] = []
 
@@ -102,6 +128,25 @@ def _normalize_transcript_turns(turns: List[Dict[str, Any]]) -> List[Dict[str, A
             "text": text,
             "timestamp": timestamp,
         }
+
+        recent_same_role_indexes: List[int] = []
+        for index in range(len(normalized_turns) - 1, -1, -1):
+            if normalized_turns[index]["role"] == role:
+                recent_same_role_indexes.append(index)
+            if len(recent_same_role_indexes) >= 4:
+                break
+
+        merged_with_recent = False
+        for index in recent_same_role_indexes:
+            candidate = normalized_turns[index]
+            if _looks_like_equivalent(candidate["text"], text):
+                if len(text) >= len(candidate["text"]):
+                    normalized_turns[index] = current_turn
+                merged_with_recent = True
+                break
+
+        if merged_with_recent:
+            continue
 
         last_turn = normalized_turns[-1] if normalized_turns else None
         if last_turn and last_turn["role"] == role and _looks_like_expansion(last_turn["text"], text):
@@ -281,11 +326,22 @@ def _build_voice_handoff_markdown(
         lines.extend([f"- {bullet}" for bullet in bullets])
         lines.append("")
 
-    lines.append("### Full Transcript")
-    for turn in turns:
-        speaker = "User" if turn["role"] == "user" else agent_name
-        lines.append(f"**{speaker}:** {turn['text']}")
-        lines.append("")
+    lines.append("### Continue in Chat")
+    lines.extend(
+        [
+            "- Reply below to continue the conversation in text.",
+            "- Ask Mira to turn this call into research, a document, a deck, or a task list.",
+            "- The full voice transcript was saved with this handoff for context.",
+            "",
+        ]
+    )
+
+    if turns:
+        lines.append("### Closing Exchange")
+        for turn in turns[-4:]:
+            speaker = "User" if turn["role"] == "user" else agent_name
+            lines.append(f"**{speaker}:** {turn['text']}")
+            lines.append("")
 
     return "\n".join(lines).strip()
 
@@ -374,8 +430,13 @@ async def _build_voice_system_prompt(thread_id: str, user_id: str, agent_id: Opt
         try:
             agent_data = await AgentLoader().load_agent(agent_id, user_id, load_config=True)
             agent_name = agent_data.name or agent_name
-            if agent_data.system_prompt:
-                base_prompt = agent_data.system_prompt.strip()
+            agent_hint = _extract_voice_role_hint(agent_data.description, agent_data.system_prompt)
+            base_prompt = (
+                f"You are {agent_name}, a specialist teammate inside VentureVerse. "
+                f"{agent_hint or 'Stay grounded in your specialty while still sounding calm, direct, and collaborative in voice mode.'} "
+                "In live voice mode, do not act like a workflow engine or read back long internal instructions. "
+                "Speak naturally, stay context-aware, and help the user think clearly in real time."
+            ).strip()
         except Exception as exc:
             logger.warning(f"Failed to load agent {agent_id} for Vapi session: {exc}")
 
@@ -397,6 +458,8 @@ async def _build_voice_system_prompt(thread_id: str, user_id: str, agent_id: Opt
         "- Do not promise background work, research runs, or thread actions after the call unless the product actually triggered them.",
         "- If the user wants a detailed report, strategy memo, deck, or proposal, explain briefly that live voice is best for discussion and they can continue in chat after the call for full execution.",
         "- Avoid repetitive openers like 'ask', 'how can I help today', or long lists of possible things the user could do.",
+        "- Never respond with placeholder phrases like 'ask hello', 'follow-up answers', or menu-style option dumps.",
+        "- Respond directly to what the user just said instead of resetting the conversation.",
     ]
 
     if memory_context:

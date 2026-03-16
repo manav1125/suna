@@ -58,8 +58,6 @@ interface LiveVoiceButtonProps {
   variant?: 'icon' | 'pill';
 }
 
-const MAX_PREVIEW_TURNS = 8;
-
 function normalizeWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
@@ -85,6 +83,83 @@ function richerText(a: string, b: string): string {
   return right.length >= left.length ? right : left;
 }
 
+function formatVoiceError(value: unknown, fallback: string): string {
+  if (!value) return fallback;
+
+  if (typeof value === 'string') {
+    const text = normalizeWhitespace(value);
+    return text || fallback;
+  }
+
+  if (value instanceof Error) {
+    return normalizeWhitespace(value.message) || fallback;
+  }
+
+  if (Array.isArray(value)) {
+    const merged = value
+      .map((item) => formatVoiceError(item, ''))
+      .filter(Boolean)
+      .join(' ');
+    return normalizeWhitespace(merged) || fallback;
+  }
+
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const nestedCandidates = [
+      record.message,
+      record.detail,
+      record.error,
+      record.errorMsg,
+      record.reason,
+      record.context,
+      record.data,
+    ];
+
+    for (const candidate of nestedCandidates) {
+      const formatted = formatVoiceError(candidate, '');
+      if (formatted) return formatted;
+    }
+
+    try {
+      const serialized = JSON.stringify(value);
+      return serialized === '{}' ? fallback : serialized;
+    } catch {
+      return fallback;
+    }
+  }
+
+  return normalizeWhitespace(String(value)) || fallback;
+}
+
+function buildTranscriptPreview(turns: PersistableTranscriptTurn[]): TranscriptPreview[] {
+  const preview: TranscriptPreview[] = [];
+  const seenKeys = new Set<string>();
+
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    const canonical = canonicalizeText(turn.text);
+    if (!canonical) continue;
+
+    const key = `${turn.role}:${canonical}`;
+    if (seenKeys.has(key)) {
+      continue;
+    }
+
+    preview.unshift({
+      role: turn.role,
+      text: normalizeWhitespace(turn.text),
+    });
+    seenKeys.add(key);
+
+    const roles = new Set(preview.map((item) => item.role));
+    if (preview.length >= 4 || (preview.length >= 2 && roles.has('user') && roles.has('assistant'))) {
+      break;
+    }
+  }
+
+  return preview.slice(-4);
+}
+
 function mergeTranscriptTurns(
   currentTurns: PersistableTranscriptTurn[],
   incomingTurns: PersistableTranscriptTurn[],
@@ -100,6 +175,33 @@ function mergeTranscriptTurns(
       text,
       timestamp: incoming.timestamp ?? null,
     };
+
+    const recentSameRoleIndexes: number[] = [];
+    for (let index = merged.length - 1; index >= 0 && recentSameRoleIndexes.length < 4; index -= 1) {
+      if (merged[index].role === normalizedTurn.role) {
+        recentSameRoleIndexes.push(index);
+      }
+    }
+
+    let mergedWithRecent = false;
+    for (const index of recentSameRoleIndexes) {
+      const candidate = merged[index];
+      if (
+        _looksLikeEquivalent(candidate.text, normalizedTurn.text)
+      ) {
+        merged[index] = {
+          ...candidate,
+          text: richerText(candidate.text, normalizedTurn.text),
+          timestamp: normalizedTurn.timestamp ?? candidate.timestamp ?? null,
+        };
+        mergedWithRecent = true;
+        break;
+      }
+    }
+
+    if (mergedWithRecent) {
+      continue;
+    }
 
     const last = merged[merged.length - 1];
     if (
@@ -141,6 +243,13 @@ function mergeTranscriptTurns(
   return merged;
 }
 
+function _looksLikeEquivalent(previous: string, next: string): boolean {
+  return (
+    looksLikeExpansion(previous, next) ||
+    canonicalizeText(previous) === canonicalizeText(next)
+  );
+}
+
 export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function LiveVoiceButton({
   threadId,
   projectId,
@@ -152,6 +261,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+  const requestedAgentId = searchParams?.get('voiceAgentId') || selectedAgentId || undefined;
 
   const [open, setOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
@@ -254,7 +364,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
   }, [extractText, normalizeRole]);
 
   const refreshPreview = useCallback(() => {
-    setTranscriptPreview(transcriptTurnsRef.current.slice(-MAX_PREVIEW_TURNS));
+    setTranscriptPreview(buildTranscriptPreview(transcriptTurnsRef.current));
   }, []);
 
   const persistCallHandoff = useCallback(async () => {
@@ -282,7 +392,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       {
         turns,
         call_id: callIdRef.current,
-        agent_id: selectedAgentId ?? null,
+        agent_id: requestedAgentId ?? null,
         agent_name: activeAgentName,
       },
       {
@@ -303,7 +413,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
     setStatusText('Call saved to chat. You can keep going in text below.');
     void queryClient.invalidateQueries({ queryKey: threadKeys.messages(threadId) });
     return true;
-  }, [activeAgentName, queryClient, selectedAgentId, threadId]);
+  }, [activeAgentName, queryClient, requestedAgentId, threadId]);
 
   const stopSession = useCallback(async () => {
     if (!vapiRef.current) {
@@ -364,7 +474,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
     const sessionResponse = await backendApi.post<VapiSessionResponse>(
       `/vapi/web/session/${threadId}`,
       {
-        agent_id: selectedAgentId ?? null,
+        agent_id: requestedAgentId ?? null,
       },
       {
         showErrors: false,
@@ -423,27 +533,21 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
       vapi.on('call-start-failed', (event: any) => {
         console.error('Vapi live voice call-start-failed', event);
         if (!mountedRef.current) return;
-        const detail =
-          event?.error ||
-          event?.context?.error ||
-          event?.context?.message ||
-          'Live voice failed to connect.';
+        const detail = formatVoiceError(
+          event?.error || event?.context || event,
+          'Live voice failed to connect.'
+        );
         setConnectionState('error');
-        setErrorMessage(String(detail));
+        setErrorMessage(detail);
         setStatusText('Live voice could not connect.');
       });
 
       vapi.on('error', (error: any) => {
         console.error('Vapi live voice error', error);
         if (!mountedRef.current) return;
-        const detail =
-          error?.message ||
-          error?.error?.message ||
-          error?.errorMsg ||
-          error?.error ||
-          'Live voice hit an unexpected error.';
+        const detail = formatVoiceError(error, 'Live voice hit an unexpected error.');
         setConnectionState('error');
-        setErrorMessage(String(detail));
+        setErrorMessage(detail);
         setStatusText('Live voice encountered an error.');
       });
 
@@ -451,10 +555,10 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
     } catch (error: any) {
       console.error('Failed to initialize Vapi live voice', error);
       setConnectionState('error');
-      setErrorMessage(error?.message || 'Live voice could not initialize.');
+      setErrorMessage(formatVoiceError(error, 'Live voice could not initialize.'));
       setStatusText('Live voice could not initialize.');
     }
-  }, [handleVapiMessage, isMuted, persistCallHandoff, selectedAgentId, threadId]);
+  }, [handleVapiMessage, isMuted, persistCallHandoff, requestedAgentId, threadId]);
 
   useEffect(() => {
     if (!threadId || autoStartConsumedRef.current) {
@@ -471,6 +575,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
 
     const nextParams = new URLSearchParams(searchParams.toString());
     nextParams.delete('voiceStart');
+    nextParams.delete('voiceAgentId');
     const nextUrl = nextParams.size ? `${pathname}?${nextParams.toString()}` : pathname;
     router.replace(nextUrl, { scroll: false });
   }, [pathname, router, searchParams, threadId]);
@@ -495,37 +600,69 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
     setStatusText(nextMuted ? 'Muted' : 'Listening...');
   }, [connectionState, isMuted]);
 
-  const handleOpenVoice = useCallback(async () => {
-    if (disabled || isPreparingThread) {
-      return;
-    }
-
-    setErrorMessage(null);
-
-    if (threadId) {
-      setOpen(true);
-      return;
-    }
-
+  const createVoiceThreadAndRoute = useCallback(async () => {
     try {
       setIsPreparingThread(true);
+      setConnectionState('connecting');
+      setStatusText('Creating your voice conversation...');
       const newThread = await createThread(projectId);
+      const params = new URLSearchParams({ voiceStart: '1' });
+      if (requestedAgentId) {
+        params.set('voiceAgentId', requestedAgentId);
+      }
       const nextUrl = newThread.project_id
-        ? `/projects/${newThread.project_id}/thread/${newThread.thread_id}?voiceStart=1`
-        : `/thread/${newThread.thread_id}?voiceStart=1`;
-      toast.success('Preparing your voice conversation...');
+        ? `/projects/${newThread.project_id}/thread/${newThread.thread_id}?${params.toString()}`
+        : `/thread/${newThread.thread_id}?${params.toString()}`;
+      toast.success('Opening your new voice conversation...');
       router.push(nextUrl);
     } catch (error: any) {
       console.error('Failed to create a voice thread', error);
-      const detail = error?.message || 'Could not create a new voice conversation.';
+      const detail = formatVoiceError(error, 'Could not create a new voice conversation.');
+      setConnectionState('error');
       setErrorMessage(detail);
+      setStatusText('Could not create a new voice conversation.');
       toast.error(detail);
     } finally {
       if (mountedRef.current) {
         setIsPreparingThread(false);
       }
     }
-  }, [disabled, isPreparingThread, projectId, router, threadId]);
+  }, [projectId, requestedAgentId, router]);
+
+  const handleOpenVoice = useCallback(() => {
+    if (disabled || isPreparingThread) {
+      return;
+    }
+
+    setErrorMessage(null);
+    setHandoffSaved(false);
+    setTranscriptPreview([]);
+    transcriptTurnsRef.current = [];
+    handoffPersistedRef.current = false;
+    callIdRef.current = null;
+    setConnectionState('idle');
+    setStatusText(
+      threadId
+        ? 'Ready to start a live conversation in this thread.'
+        : 'Ready to start a new voice conversation.'
+    );
+    setOpen(true);
+  }, [disabled, isPreparingThread, threadId]);
+
+  const handleStartLiveVoice = useCallback(async () => {
+    if (connectionState === 'connecting' || connectionState === 'ending' || isPreparingThread) {
+      return;
+    }
+
+    setErrorMessage(null);
+
+    if (threadId) {
+      await startSession();
+      return;
+    }
+
+    await createVoiceThreadAndRoute();
+  }, [connectionState, createVoiceThreadAndRoute, isPreparingThread, startSession, threadId]);
 
   const renderButton = () => {
     const commonProps = {
@@ -596,7 +733,9 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
                 Live voice with {activeAgentName}
               </DialogTitle>
               <DialogDescription className="mt-3 max-w-2xl text-lg leading-8 text-white/72">
-                Talk through ideas in real time. When the call ends, Mira saves one clean handoff into chat so you can keep going in text without the transcript clutter.
+                {threadId
+                  ? 'Talk through ideas in real time. When the call ends, Mira saves one clean handoff into chat so you can keep going in text without the transcript clutter.'
+                  : 'Start a voice-first conversation. When the call ends, Mira opens a clean thread handoff so you can continue in text without losing the flow.'}
               </DialogDescription>
             </DialogHeader>
 
@@ -726,12 +865,16 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
                 ) : (
                   <Button
                     type="button"
-                    onClick={() => void startSession()}
-                    disabled={connectionState === 'connecting' || !threadId}
+                    onClick={() => void handleStartLiveVoice()}
+                    disabled={connectionState === 'connecting' || isPreparingThread}
                     className="gap-2 rounded-2xl bg-white px-5 text-black hover:bg-white/90"
                   >
                     <PhoneOutgoing className="h-4 w-4" />
-                    {connectionState === 'connecting' ? 'Connecting…' : 'Start live voice'}
+                    {isPreparingThread
+                      ? 'Creating thread…'
+                      : connectionState === 'connecting'
+                        ? 'Connecting…'
+                        : 'Start live voice'}
                   </Button>
                 )}
               </div>
@@ -742,7 +885,7 @@ export const LiveVoiceButton: React.FC<LiveVoiceButtonProps> = memo(function Liv
                 </p>
                 {transcriptPreview.length === 0 ? (
                   <p className="text-sm leading-7 text-white/62">
-                    Your latest user and assistant turns will appear here while the call is active. The thread stays clean until the final handoff is saved.
+                    The latest exchange shows up here while the call is active. The thread stays clean until the final handoff is saved.
                   </p>
                 ) : (
                   <div className="space-y-3">
